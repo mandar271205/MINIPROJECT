@@ -7,6 +7,7 @@ __pycache__/
 
 # Virtual environments
 venv/
+venv312/
 .venv/
 myenv/
 
@@ -18,3 +19,10 @@ storage/
 
 # Logs
 *.log
+
+# Database backups (may contain real student/attendance data)
+backend/backups/
+*.db
+
+# Test artifacts
+.pytest_cache/

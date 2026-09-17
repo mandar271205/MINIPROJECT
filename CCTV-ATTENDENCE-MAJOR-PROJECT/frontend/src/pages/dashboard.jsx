@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import Modal from "@/components/Modal";
-import { createClass, createFaculty, deleteClass, getClasses, getMe } from "@/lib/api";
+import { createClass, createFaculty, deleteClass, getClasses, getMe, getMyFacultyAssignments } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 
 const DashboardPage = () => {
@@ -10,6 +10,7 @@ const DashboardPage = () => {
 
   const [user, setUser] = useState(null);
   const [classes, setClasses] = useState([]);
+  const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -31,6 +32,17 @@ const DashboardPage = () => {
       const [meResponse, classResponse] = await Promise.all([getMe(), getClasses()]);
       setUser(meResponse.user);
       setClasses(classResponse.classes || []);
+
+      if (meResponse.user?.role === "faculty") {
+        try {
+          const myAssignments = await getMyFacultyAssignments();
+          setAssignments(myAssignments);
+        } catch {
+          // Assigned-subjects panel is a convenience addition; failing to
+          // load it should never block the rest of the dashboard.
+          setAssignments([]);
+        }
+      }
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -112,6 +124,14 @@ const DashboardPage = () => {
 
           <div className="flex items-center gap-3">
             {isHod ? (
+              <Link
+                to="/academic"
+                className="rounded-lg border border-white/60 bg-white/10 px-4 py-2 font-semibold text-white shadow-sm transition hover:bg-white/20"
+              >
+                Academic Management
+              </Link>
+            ) : null}
+            {isHod ? (
               <button
                 type="button"
                 onClick={() => setFacultyOpen(true)}
@@ -143,6 +163,32 @@ const DashboardPage = () => {
 
         {loading ? (
           <div className="rounded-2xl border border-gray-200 bg-white p-6 text-gray-600">Loading classes...</div>
+        ) : null}
+
+        {!loading && !isHod && user?.role === "faculty" ? (
+          <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-gray-500">
+              My Assigned Subjects
+            </h2>
+            {assignments.length === 0 ? (
+              <p className="text-sm text-gray-600">
+                No subjects have been assigned to you yet by the HOD.
+              </p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {assignments.map((a) => (
+                  <div key={a.id} className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                    <p className="font-semibold text-gray-900">
+                      {a.subject.code} - {a.subject.name}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      {a.division.program} - {a.division.name}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         ) : null}
 
         {!loading && classes.length === 0 ? (

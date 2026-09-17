@@ -10,7 +10,12 @@ class User(db.Model):
     name = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(20), nullable=False, default="faculty")
+    role = db.Column(db.String(20), nullable=False, default="student")
+    # Phase 2 correction: lets an HOD deactivate a faculty account (or the
+    # user account linked to a student) without deleting it. Existing
+    # rows are backfilled to True by the migration, so nobody who could
+    # already log in is locked out by this change.
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     def set_password(self, raw_password: str) -> None:
@@ -25,4 +30,5 @@ class User(db.Model):
             "name": self.name,
             "email": self.email,
             "role": self.role,
+            "is_active": self.is_active,
         }

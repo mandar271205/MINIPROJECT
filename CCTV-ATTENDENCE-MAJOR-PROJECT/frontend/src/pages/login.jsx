@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { login } from "@/lib/api";
-import { setToken } from "@/lib/auth";
+import { decodeJwt, setToken } from "@/lib/auth";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -20,7 +20,16 @@ const LoginPage = () => {
     try {
       const response = await login({ ...form, role: loginRole });
       setToken(response.token);
-      navigate("/dashboard", { replace: true });
+
+      // Route by the role actually issued in the token, not the tab the
+      // user clicked, so a stale/mismatched selection can't send anyone
+      // to a screen their account doesn't back.
+      const payload = decodeJwt(response.token);
+      if (payload?.role === "student") {
+        navigate("/student/profile", { replace: true });
+      } else {
+        navigate("/dashboard", { replace: true });
+      }
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -39,7 +48,7 @@ const LoginPage = () => {
 
           <div className="mb-4">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">Login As</p>
-            <div className="mt-2 grid grid-cols-2 gap-2 rounded-lg bg-gray-100 p-1">
+            <div className="mt-2 grid grid-cols-3 gap-2 rounded-lg bg-gray-100 p-1">
               <button
                 type="button"
                 onClick={() => setLoginRole("faculty")}
@@ -61,6 +70,17 @@ const LoginPage = () => {
                 }`}
               >
                 HOD
+              </button>
+              <button
+                type="button"
+                onClick={() => setLoginRole("student")}
+                className={`rounded-md px-3 py-2 text-sm font-semibold transition ${
+                  loginRole === "student"
+                    ? "bg-[#C10202] text-white"
+                    : "border border-[#C10202] text-[#C10202] hover:bg-red-50"
+                }`}
+              >
+                Student
               </button>
             </div>
           </div>
@@ -109,15 +129,20 @@ const LoginPage = () => {
             </button>
           </form>
 
-          {loginRole === "faculty" ? (
+          {loginRole === "student" ? (
             <p className="mt-6 text-sm text-gray-600">
               New here?{" "}
               <Link to="/register" className="font-semibold text-[#C10202] hover:text-[#8B1A1A]">
                 Create account
               </Link>
+              . Your HOD still needs to link it to your class record before your profile shows data.
             </p>
           ) : (
-            <p className="mt-6 text-sm text-gray-600">HOD accounts are provisioned by the admin.</p>
+            <p className="mt-6 text-sm text-gray-600">
+              {loginRole === "faculty"
+                ? "Faculty accounts are created by your HOD."
+                : "HOD accounts are provisioned by the admin."}
+            </p>
           )}
         </div>
       </div>

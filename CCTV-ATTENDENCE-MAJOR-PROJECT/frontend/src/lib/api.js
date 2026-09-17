@@ -47,7 +47,13 @@ const request = async (path, options = {}) => {
       const raw = await response.text();
       try {
         const errorBody = JSON.parse(raw);
-        message = errorBody.error || errorBody.message || message;
+        // Phase 1 routes use {"error": "text"}; Phase 2 routes use the
+        // standardized {"error": {"code", "message"}} envelope.
+        message =
+          (errorBody.error && errorBody.error.message) ||
+          (typeof errorBody.error === "string" ? errorBody.error : null) ||
+          errorBody.message ||
+          message;
       } catch {
         message = raw || message;
       }
@@ -73,11 +79,11 @@ const request = async (path, options = {}) => {
 export const login = async ({ email, password, role }) =>
   request("/api/auth/login", { method: "POST", body: { email, password, role } });
 
+// Public self-registration can only ever create a "student" account -
+// the backend rejects any other role outright, so it is sent explicitly
+// here for clarity even though the server also defaults to it.
 export const register = async ({ name, email, password }) =>
-  request("/api/auth/register", { method: "POST", body: { name, email, password } });
-
-export const createFaculty = async ({ name, email, password }) =>
-  request("/api/auth/faculty", { method: "POST", body: { name, email, password } });
+  request("/api/auth/register", { method: "POST", body: { name, email, password, role: "student" } });
 
 export const getMe = async () => request("/api/auth/me");
 
@@ -160,3 +166,77 @@ export const downloadPDF = async (sessionId) =>
     responseType: "blob",
     fallbackFilename: `attendance_session_${sessionId}.pdf`,
   });
+
+// --- Phase 2: academic hierarchy (HOD-managed) ---------------------------
+// These endpoints return the standardized {success, data, message} /
+// {success, error: {code, message}} envelope, unlike the Phase 1 routes
+// above. `request()` already throws on non-2xx with a readable message.
+
+export const getAcademicYears = async () => (await request("/api/academic/years")).data;
+export const createAcademicYear = async (payload) =>
+  (await request("/api/academic/years", { method: "POST", body: payload })).data;
+export const updateAcademicYear = async (id, payload) =>
+  (await request(`/api/academic/years/${id}`, { method: "PUT", body: payload })).data;
+export const deleteAcademicYear = async (id) => request(`/api/academic/years/${id}`, { method: "DELETE" });
+
+export const getSemesters = async (academicYearId) => {
+  const query = academicYearId ? `?academic_year_id=${encodeURIComponent(academicYearId)}` : "";
+  return (await request(`/api/academic/semesters${query}`)).data;
+};
+export const createSemester = async (payload) =>
+  (await request("/api/academic/semesters", { method: "POST", body: payload })).data;
+export const updateSemester = async (id, payload) =>
+  (await request(`/api/academic/semesters/${id}`, { method: "PUT", body: payload })).data;
+export const deleteSemester = async (id) => request(`/api/academic/semesters/${id}`, { method: "DELETE" });
+
+export const getDivisions = async (semesterId) => {
+  const query = semesterId ? `?semester_id=${encodeURIComponent(semesterId)}` : "";
+  return (await request(`/api/academic/divisions${query}`)).data;
+};
+export const createDivision = async (payload) =>
+  (await request("/api/academic/divisions", { method: "POST", body: payload })).data;
+export const updateDivision = async (id, payload) =>
+  (await request(`/api/academic/divisions/${id}`, { method: "PUT", body: payload })).data;
+export const deleteDivision = async (id) => request(`/api/academic/divisions/${id}`, { method: "DELETE" });
+
+export const getSubjects = async (semesterId) => {
+  const query = semesterId ? `?semester_id=${encodeURIComponent(semesterId)}` : "";
+  return (await request(`/api/academic/subjects${query}`)).data;
+};
+export const createSubject = async (payload) =>
+  (await request("/api/academic/subjects", { method: "POST", body: payload })).data;
+export const updateSubject = async (id, payload) =>
+  (await request(`/api/academic/subjects/${id}`, { method: "PUT", body: payload })).data;
+export const deleteSubject = async (id) => request(`/api/academic/subjects/${id}`, { method: "DELETE" });
+
+export const getFacultyAssignments = async () => (await request("/api/academic/faculty-assignments")).data;
+export const createFacultyAssignment = async (payload) =>
+  (await request("/api/academic/faculty-assignments", { method: "POST", body: payload })).data;
+export const deleteFacultyAssignment = async (id) =>
+  request(`/api/academic/faculty-assignments/${id}`, { method: "DELETE" });
+
+export const getMyFacultyAssignments = async () => (await request("/api/faculty/me/assignments")).data;
+
+export const getStudentProfile = async () => (await request("/api/student/me/profile")).data;
+
+// --- Phase 2 correction: HOD-only account management ----------------------
+
+export const getFacultyAccounts = async () => (await request("/api/admin/faculty")).data;
+export const createFaculty = async ({ name, email, password }) =>
+  (await request("/api/admin/faculty", { method: "POST", body: { name, email, password } })).data;
+export const updateFacultyAccount = async (id, payload) =>
+  (await request(`/api/admin/faculty/${id}`, { method: "PUT", body: payload })).data;
+export const setFacultyAccountStatus = async (id, isActive) =>
+  (await request(`/api/admin/faculty/${id}/status`, { method: "PUT", body: { is_active: isActive } })).data;
+
+export const linkStudentAccount = async (studentId, userId) =>
+  (await request(`/api/admin/students/${studentId}/account`, { method: "POST", body: { user_id: userId } })).data;
+export const relinkStudentAccount = async (studentId, userId) =>
+  (await request(`/api/admin/students/${studentId}/account`, { method: "PUT", body: { user_id: userId } })).data;
+export const setStudentAccountStatus = async (studentId, isActive) =>
+  (
+    await request(`/api/admin/students/${studentId}/account/status`, {
+      method: "PUT",
+      body: { is_active: isActive },
+    })
+  ).data;

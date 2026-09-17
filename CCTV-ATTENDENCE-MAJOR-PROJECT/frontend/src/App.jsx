@@ -2,12 +2,14 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 
 import ProtectedRoute from "@/components/ProtectedRoute";
+import AcademicManagementPage from "@/pages/academic";
 import AttendanceReportPage from "@/pages/attendance/[id]";
 import ClassDetailPage from "@/pages/classes/[id]";
 import DashboardPage from "@/pages/dashboard";
 import IndexPage from "@/pages/index";
 import LoginPage from "@/pages/login";
 import RegisterPage from "@/pages/register";
+import StudentProfilePage from "@/pages/student/profile";
 
 const App = () => {
   return (
@@ -41,6 +43,24 @@ const App = () => {
           element={
             <ProtectedRoute>
               <AttendanceReportPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/academic"
+          element={
+            <ProtectedRoute roles={["hod"]}>
+              <AcademicManagementPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/student/profile"
+          element={
+            <ProtectedRoute roles={["student"]}>
+              <StudentProfilePage />
             </ProtectedRoute>
           }
         />
