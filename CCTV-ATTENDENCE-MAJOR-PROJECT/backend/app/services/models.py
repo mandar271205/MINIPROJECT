@@ -63,11 +63,18 @@ class AttendanceDecision:
 
 @dataclass
 class EnrolledStudent:
-    """A student record with their stored embedding."""
+    """A student record with their stored embedding, the exact
+    model/dimension it was generated with, and its embedding_status.
+    Used by recognition_eligibility.classify_enrolled_students() to
+    decide eligibility for recognition/matching/legacy attendance
+    decisions - never decided ad hoc at the call site."""
     student_id: int
     name: str
     class_id: int
     embedding: np.ndarray   # (512,) float32
+    model_id: str | None = None
+    embedding_dimension: int | None = None
+    embedding_status: str | None = None
 
 
 @dataclass

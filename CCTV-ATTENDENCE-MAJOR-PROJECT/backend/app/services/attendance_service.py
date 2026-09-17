@@ -31,12 +31,26 @@ def _process_session(app, session_id: int) -> None:
         session.error_message = None
         db.session.commit()
 
+        # --- Live progress callback: update DB every few % ---
+        _last_reported = [0]
+
+        def _progress(pct: int) -> None:
+            if pct - _last_reported[0] >= 5:          # update every 5%
+                _last_reported[0] = pct
+                try:
+                    s = db.session.get(AttendanceSession, session_id)
+                    if s:
+                        s.progress_pct = pct
+                        db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
         try:
             pipeline = CctvAttendancePipeline(
                 student_repo=StudentRepository(db.session),
                 attendance_repo=AttendanceRepository(db.session),
-                frame_interval=float(app.config.get("FRAME_SAMPLE_EVERY", 2.0)),
-                match_threshold=float(app.config.get("MATCH_THRESHOLD", 0.55)),
+                frame_interval=float(app.config["FRAME_SAMPLE_INTERVAL_SECONDS"]),
+                match_threshold=float(app.config["FACE_MATCH_THRESHOLD"]),
                 grace_period_minutes=session.classroom.grace_period_minutes,
             )
 
@@ -44,15 +58,21 @@ def _process_session(app, session_id: int) -> None:
                 video_path=session.video_path,
                 class_id=session.class_id,
                 session_id=session.id,
-                class_start_time=session.class_start_time.isoformat() if session.class_start_time else None
+                class_start_time=session.class_start_time.isoformat() if session.class_start_time else None,
+                progress_callback=_progress,
             )
 
             if "error" in results and results["error"]:
+                # Never reports "done"/100% on failure - the pipeline
+                # itself does not persist any decisions in this branch.
                 session.processing_status = "error"
                 session.error_message = results["error"]
                 db.session.commit()
                 return
 
+            # Progress only reaches 100 here, after save_decisions()
+            # already ran inside pipeline.run() and the video's actual
+            # EOF was reached (diagnostics["eof_reached"] is True).
             session.processing_status = "done"
             session.progress_pct = 100
             if not session.class_start_time:
@@ -65,3 +85,4 @@ def _process_session(app, session_id: int) -> None:
             session.processing_status = "error"
             session.error_message = str(exc)
             db.session.commit()
+

@@ -21,6 +21,25 @@ def create_app() -> Flask:
     if not app.config.get("SQLALCHEMY_DATABASE_URI"):
         raise RuntimeError("DATABASE_URL is not set. Add it to your .env file.")
 
+    # Phase 3: fail loudly at startup on invalid recognition config
+    # instead of letting a bad value surface later as a confusing job
+    # failure, and never silently fall back to a different provider.
+    if app.config["FACE_RECOGNITION_PROVIDER"] != "insightface_arcface":
+        raise RuntimeError(
+            "FACE_RECOGNITION_PROVIDER must be 'insightface_arcface' - "
+            f"got {app.config['FACE_RECOGNITION_PROVIDER']!r}"
+        )
+    if not (0.0 < app.config["FACE_MATCH_THRESHOLD"] < 1.0):
+        raise RuntimeError(
+            "FACE_MATCH_THRESHOLD must be strictly between 0 and 1 - "
+            f"got {app.config['FACE_MATCH_THRESHOLD']!r}"
+        )
+    if not (app.config["FRAME_SAMPLE_INTERVAL_SECONDS"] > 0.0):
+        raise RuntimeError(
+            "FRAME_SAMPLE_INTERVAL_SECONDS must be greater than zero - "
+            f"got {app.config['FRAME_SAMPLE_INTERVAL_SECONDS']!r}"
+        )
+
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
@@ -47,6 +66,31 @@ def create_app() -> Flask:
     @app.get("/api/health")
     def health_check():
         return jsonify({"status": "ok"})
+
+    @app.cli.command("transition-embeddings")
+    def transition_embeddings_command():
+        """Regenerate existing students' embeddings with the active
+        InsightFaceArcFaceProvider where a valid reference image
+        allows it; safely mark the rest for re-enrolment. Never run
+        automatically - an operator invokes this explicitly:
+
+            flask transition-embeddings
+        """
+        from .services.embedding_transition import transition_all_students
+
+        report = transition_all_students()
+        regenerated = sum(1 for r in report if r["result"] == "regenerated")
+        skipped = sum(1 for r in report if r["result"] == "skipped")
+        failed = sum(1 for r in report if r["result"] == "failed")
+        print(f"Embedding transition complete: {len(report)} students processed")
+        print(f"  regenerated={regenerated} skipped(reenroll)={skipped} failed={failed}")
+        for entry in report:
+            print(
+                f"  student_id={entry['student_id']} result={entry['result']} "
+                f"previous_model_id={entry['previous_model_id']} new_model_id={entry['new_model_id']} "
+                f"reenrollment_required={entry['reenrollment_required']} "
+                f"reason={entry['failure_reason']}"
+            )
 
     @app.errorhandler(DomainError)
     def handle_domain_error(exc: DomainError):

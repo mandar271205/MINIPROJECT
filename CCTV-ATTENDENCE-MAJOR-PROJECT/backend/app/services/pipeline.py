@@ -1,57 +1,86 @@
 """End-to-end attendance pipeline.
 
-Orchestrates steps 1–8 from the architecture diagram:
+Orchestrates:
 
   1. Video upload / ingest
-  2. Frame sampling (configurable interval)
-  3. Face detection & alignment (RetinaFace via insightface)
-  4. Dual-branch recognition (AdaFace + Swin Transformer)
-  5. Feature fusion (concatenation + FC → 512-D)
-  6. Matching against enrolled student embeddings (cosine similarity)
-  7. First-appearance tracking & attendance decision
-  8. Report generation (XLSX / PDF) & notifications (email / SMS)
+  2. Frame sampling (configurable interval) - read through to actual EOF
+  3. Face detection & alignment (RetinaFace/SCRFD via insightface)
+  4. Recognition via the single verified InsightFaceArcFaceProvider
+  5. Matching against compatible enrolled student embeddings only
+  6. First-appearance tracking (legacy output, does not control
+     termination) & attendance decision
+  7. Report generation (XLSX / PDF)
 
-This module is a **reference implementation** – the running server uses
-``app.services.attendance_service`` instead.
+Phase 3 changes from the earlier reference implementation:
+
+  - Removed the "all enrolled students identified" early-stop. The
+    pipeline now always samples frames until the video's actual EOF.
+  - Replaced the AdaFace + Swin Transformer + arithmetic-fusion path
+    with the single verified ``InsightFaceArcFaceProvider``.
+  - Matching only ever considers embeddings whose stored model id and
+    dimension exactly match the active provider; incompatible legacy
+    templates are excluded, never force-converted or silently ignored.
+  - Structured diagnostics are returned for every run, whether it
+    succeeds or fails.
+
+This is the module actually used at runtime, via
+``app.services.attendance_service``.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import cv2
 
 from .attendance_decision import decide_attendance, format_timestamp
 from .face_detection import RetinaFaceDetector
 from .first_appearance import FirstAppearanceTracker
 from .frame_sampling import sample_frames
-from .fusion import EmbeddingFusion
 from .matching import match_face
-from .models import AttendanceReport, EnrolledStudent
+from .models import AttendanceReport
 from .notifications import NotificationDispatcher
 from .output_reports import generate_pdf, generate_xlsx
-from .recognition_adaptive import AdaFaceRecognizer
-from .recognition_transformer import SwinTransformerRecognizer
+from .recognition_eligibility import classify_enrolled_students
+from .recognition_provider import (
+    EmbeddingValidationError,
+    InsightFaceArcFaceProvider,
+    get_provider,
+)
 from .repositories import AttendanceRepository, StudentRepository
 
 log = logging.getLogger(__name__)
 
 
+class PipelineConfigError(ValueError):
+    """Raised for invalid pipeline configuration (threshold, interval).
+    Never silently clamped - the job is failed with a clear message."""
+
+
+def _validate_config(match_threshold: float, frame_interval: float) -> None:
+    if not (0.0 < match_threshold < 1.0):
+        raise PipelineConfigError(
+            f"FACE_MATCH_THRESHOLD must be strictly between 0 and 1, got {match_threshold!r}"
+        )
+    if not (frame_interval > 0.0):
+        raise PipelineConfigError(
+            f"FRAME_SAMPLE_INTERVAL_SECONDS must be greater than zero, got {frame_interval!r}"
+        )
+
+
 class CctvAttendancePipeline:
     """
     Full CCTV-based automated attendance pipeline.
-
-    Wires all architecture components together and executes them
-    in sequence for a single video / session.
     """
 
     def __init__(
         self,
         *,
         detector: RetinaFaceDetector | None = None,
-        adaface: AdaFaceRecognizer | None = None,
-        swin: SwinTransformerRecognizer | None = None,
-        fusion: EmbeddingFusion | None = None,
+        provider: InsightFaceArcFaceProvider | None = None,
         student_repo: StudentRepository | None = None,
         attendance_repo: AttendanceRepository | None = None,
         notifier: NotificationDispatcher | None = None,
@@ -59,10 +88,10 @@ class CctvAttendancePipeline:
         match_threshold: float = 0.55,
         grace_period_minutes: int = 10,
     ) -> None:
+        _validate_config(match_threshold, frame_interval)
+
         self.detector = detector or RetinaFaceDetector()
-        self.adaface = adaface or AdaFaceRecognizer()
-        self.swin = swin or SwinTransformerRecognizer()
-        self.fusion = fusion or EmbeddingFusion()
+        self.provider = provider or get_provider()
         self.student_repo = student_repo
         self.attendance_repo = attendance_repo
         self.notifier = notifier
@@ -78,135 +107,179 @@ class CctvAttendancePipeline:
         session_id: int,
         class_start_time: str | None = None,
         report_dir: str | None = None,
+        progress_callback=None,
     ) -> dict:
         """
         Execute the full CCTV attendance pipeline.
 
-        Parameters
-        ----------
-        video_path : str
-            Path to the uploaded MP4 / AVI / MOV file.
-        class_id : int
-            ID of the classroom whose enrolled students we compare against.
-        session_id : int
-            ID of the attendance session being processed.
-        class_start_time : str | None
-            ISO-8601 datetime string for the official class start.
-        report_dir : str | None
-            Directory to save generated reports. If None, reports are
-            returned as in-memory buffers.
-
-        Returns
-        -------
-        dict
-            Pipeline results including attendance decisions and report paths.
+        Returns a dict of results including structured diagnostics
+        (see module docstring). On any hard error, returns a dict with
+        an "error" key and a "diagnostics" key with whatever partial
+        information was gathered - the caller is responsible for
+        marking the session as failed, never as completed.
         """
+        start_wall = time.monotonic()
         log.info(
-            "Starting pipeline: video=%s, class=%d, session=%d",
-            video_path, class_id, session_id,
+            "Starting pipeline: video=%s, class=%d, session=%d, provider=%s, execution_provider=%s",
+            video_path, class_id, session_id, self.provider.model_id, self.provider.execution_provider,
+        )
+
+        diagnostics: dict = {
+            "video_duration_sec": None,
+            "total_frames": None,
+            "frames_read": 0,
+            "frames_sampled": 0,
+            "final_sampled_timestamp_sec": None,
+            "faces_detected": 0,
+            "compatible_templates": 0,
+            "successful_matches": 0,
+            "invalid_embeddings": 0,
+            "processing_duration_sec": None,
+            "eof_reached": False,
+            "provider_model_id": self.provider.model_id,
+            "execution_provider": self.provider.execution_provider,
+            "recognition_eligible_count": 0,
+            "recognition_ineligible_count": 0,
+            "students_requiring_reenrollment": 0,
+            "attendance_not_generated_count": 0,
+        }
+
+        # ------------------------------------------------------------ #
+        # Step 1 - Load enrolled students & split by eligibility.      #
+        # Only ACTIVE, exact-model-id, exact-dimension, valid-vector   #
+        # students are eligible. Ineligible students (LEGACY_          #
+        # INCOMPATIBLE / REENROLL_REQUIRED / FAILED / missing /        #
+        # wrong model / wrong dimension / invalid vector) NEVER enter  #
+        # matching, FirstAppearanceTracker, or the legacy present/     #
+        # late-absent/absent decision below - they get a diagnostic    #
+        # instead, never a fabricated ABSENT record.                   #
+        # ------------------------------------------------------------ #
+        enrolled_all = self.student_repo.get_enrolled(class_id) if self.student_repo else []
+        eligible, ineligible_diagnostics = classify_enrolled_students(enrolled_all, self.provider)
+
+        diagnostics["compatible_templates"] = len(eligible)
+        diagnostics["recognition_eligible_count"] = len(eligible)
+        diagnostics["recognition_ineligible_count"] = len(ineligible_diagnostics)
+        diagnostics["students_requiring_reenrollment"] = sum(
+            1 for d in ineligible_diagnostics if d["requires_reenrollment"]
+        )
+        diagnostics["attendance_not_generated_count"] = len(ineligible_diagnostics)
+
+        log.info(
+            "Loaded %d enrolled students for class %d (%d eligible, %d ineligible/require re-enrolment)",
+            len(enrolled_all), class_id, len(eligible), len(ineligible_diagnostics),
         )
 
         # ------------------------------------------------------------ #
-        # Step 1 – Load enrolled students                               #
+        # Step 2 - Probe video metadata (duration, total frames)       #
         # ------------------------------------------------------------ #
-        if self.student_repo:
-            enrolled = self.student_repo.get_enrolled(class_id)
-        else:
-            enrolled = []
-
-        if not enrolled:
-            log.warning("No enrolled students found for class %d", class_id)
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            cap.release()
+            diagnostics["processing_duration_sec"] = round(time.monotonic() - start_wall, 3)
             return {
                 "session_id": session_id,
-                "error": "No enrolled students found",
-                "attendance": [],
+                "error": f"Cannot open or read video file: {video_path}",
+                "diagnostics": diagnostics,
+                "ineligible_students": ineligible_diagnostics,
             }
 
-        log.info("Loaded %d enrolled students", len(enrolled))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        cap.release()
+        diagnostics["total_frames"] = total_frames if total_frames > 0 else None
+        diagnostics["video_duration_sec"] = round(total_frames / fps, 3) if total_frames > 0 else None
+        total_samples_estimate = max(1, int(total_frames / (fps * self.frame_interval))) if total_frames > 0 else None
 
         # ------------------------------------------------------------ #
-        # Step 2 – Frame sampling                                       #
+        # Step 3-6 - Sample frames through to EOF, detect, recognize,  #
+        #            match, track first appearance                    #
         # ------------------------------------------------------------ #
         tracker = FirstAppearanceTracker()
-        frames_processed = 0
-        faces_detected = 0
 
-        for sample in sample_frames(video_path, every_n_seconds=self.frame_interval):
-            frames_processed += 1
+        try:
+            for sample in sample_frames(video_path, every_n_seconds=self.frame_interval):
+                diagnostics["frames_read"] += 1
+                diagnostics["frames_sampled"] += 1
+                diagnostics["final_sampled_timestamp_sec"] = sample.timestamp_sec
 
-            # -------------------------------------------------------- #
-            # Step 3 – Face detection & alignment                       #
-            # -------------------------------------------------------- #
-            detections = self.detector.detect(sample)
-            if not detections:
-                continue
+                if progress_callback and total_samples_estimate:
+                    # 5%-95% during processing; 100% is only ever set by
+                    # the caller after results have been persisted.
+                    pct = min(95, 5 + int(90 * diagnostics["frames_sampled"] / total_samples_estimate))
+                    progress_callback(pct)
 
-            faces_detected += len(detections)
+                detections = self.detector.detect(sample)
+                if not detections:
+                    continue
 
-            for detection in detections:
-                # ---------------------------------------------------- #
-                # Step 4a – AdaFace embedding                           #
-                # ---------------------------------------------------- #
-                ada_emb = self.adaface.embed(detection)
+                diagnostics["faces_detected"] += len(detections)
 
-                # ---------------------------------------------------- #
-                # Step 4b – Swin Transformer embedding                  #
-                # ---------------------------------------------------- #
-                swin_emb = self.swin.embed(detection)
+                for detection in detections:
+                    try:
+                        embedding_vec = self.provider.extract_embedding(detection.aligned_face)
+                    except EmbeddingValidationError:
+                        diagnostics["invalid_embeddings"] += 1
+                        continue
 
-                # ---------------------------------------------------- #
-                # Step 5 – Fusion (AdaFace + Swin-T → 512-D)           #
-                # ---------------------------------------------------- #
-                fused_emb = self.fusion.fuse(ada_emb, swin_emb)
+                    if not eligible:
+                        # No eligible template exists for this class -
+                        # a real, reportable state, not a silent skip.
+                        continue
 
-                # ---------------------------------------------------- #
-                # Step 6 – Matching against enrolled embeddings         #
-                # ---------------------------------------------------- #
-                match = match_face(
-                    fused_emb,
-                    enrolled,
-                    threshold=self.match_threshold,
-                )
+                    from .models import FaceEmbedding
 
-                # ---------------------------------------------------- #
-                # Step 7a – Track first appearance                      #
-                # ---------------------------------------------------- #
-                if match.is_match:
-                    tracker.update(match, sample.timestamp_sec)
+                    query = FaceEmbedding(vector=embedding_vec, model_name=self.provider.model_id)
+                    match = match_face(query, eligible, threshold=self.match_threshold)
 
-            # Early exit if all students have been identified
-            if len(tracker) == len(enrolled):
-                log.info(
-                    "All %d students identified by frame %d (%.1fs)",
-                    len(enrolled), sample.index, sample.timestamp_sec,
-                )
-                break
+                    if match.is_match:
+                        diagnostics["successful_matches"] += 1
+                        tracker.update(match, sample.timestamp_sec)
+
+                # Deliberately no early-stop here: processing continues
+                # through every scheduled frame regardless of how many
+                # students FirstAppearanceTracker has already recorded.
+
+            diagnostics["eof_reached"] = True
+        except Exception as exc:
+            diagnostics["processing_duration_sec"] = round(time.monotonic() - start_wall, 3)
+            log.exception("Pipeline failed while reading video for session %d", session_id)
+            return {
+                "session_id": session_id,
+                "error": f"Video processing failed: {exc}",
+                "diagnostics": diagnostics,
+                "ineligible_students": ineligible_diagnostics,
+            }
 
         log.info(
-            "Processed %d frames, detected %d faces, identified %d students",
-            frames_processed, faces_detected, len(tracker),
+            "session=%d frames_sampled=%d faces_detected=%d compatible_templates=%d successful_matches=%d eof_reached=%s",
+            session_id, diagnostics["frames_sampled"], diagnostics["faces_detected"],
+            diagnostics["compatible_templates"], diagnostics["successful_matches"], diagnostics["eof_reached"],
         )
 
         # ------------------------------------------------------------ #
-        # Step 7b – Attendance decisions                                #
+        # Step 7 - Legacy first-appearance attendance decision.        #
+        # Only ever evaluated over `eligible` - an ineligible student  #
+        # can never receive PRESENT/LATE-ABSENT/ABSENT from this run.  #
+        # (temporarily preserved output format; see FirstAppearanceTracker) #
         # ------------------------------------------------------------ #
         appearances = tracker.get_all()
-        decisions = decide_attendance(
-            enrolled,
-            appearances,
-            grace_period_minutes=self.grace_period_minutes,
+        decisions = (
+            decide_attendance(eligible, appearances, grace_period_minutes=self.grace_period_minutes)
+            if eligible
+            else []
         )
 
         # ------------------------------------------------------------ #
-        # Step 8a – Persist results                                     #
+        # Step 8 - Persist results.                                    #
+        # Skipped entirely when there is no eligible student: nothing  #
+        # is written, so any previously existing valid records for     #
+        # this session are left untouched rather than being cleared.  #
         # ------------------------------------------------------------ #
-        if self.attendance_repo:
+        if self.attendance_repo and decisions:
             self.attendance_repo.save_decisions(session_id, decisions)
             log.info("Saved attendance decisions for session %d", session_id)
 
-        # ------------------------------------------------------------ #
-        # Step 8b – Generate reports                                    #
-        # ------------------------------------------------------------ #
         report = AttendanceReport(
             class_id=class_id,
             session_id=session_id,
@@ -215,7 +288,7 @@ class CctvAttendancePipeline:
         )
 
         report_paths = {}
-        if report_dir:
+        if report_dir and decisions:
             rd = Path(report_dir)
             rd.mkdir(parents=True, exist_ok=True)
             xlsx_path = rd / f"attendance_session_{session_id}.xlsx"
@@ -227,26 +300,34 @@ class CctvAttendancePipeline:
             report_paths = {"xlsx": str(xlsx_path), "pdf": str(pdf_path)}
             log.info("Reports saved to %s", report_dir)
 
-        # ------------------------------------------------------------ #
-        # Step 8c – Notifications                                       #
-        # ------------------------------------------------------------ #
-        if self.notifier:
-            # Notifications would be configured per-user in production
-            log.info("Notification dispatcher available (not sending by default)")
+        diagnostics["processing_duration_sec"] = round(time.monotonic() - start_wall, 3)
 
-        # ------------------------------------------------------------ #
-        # Build response                                                #
-        # ------------------------------------------------------------ #
         present = sum(1 for d in decisions if d.status == "present")
         late = sum(1 for d in decisions if d.status == "late-absent")
         absent = sum(1 for d in decisions if d.status == "absent")
 
-        return {
+        # This is processing metadata describing whether/how much
+        # legacy attendance was generated - never a Phase 4 attendance
+        # status, and never claiming success when no eligible student
+        # existed to evaluate.
+        if not eligible:
+            attendance_generation_status = "NOT_GENERATED"
+        elif ineligible_diagnostics:
+            attendance_generation_status = "PARTIAL_ROSTER"
+        else:
+            attendance_generation_status = "GENERATED"
+
+        result = {
             "session_id": session_id,
             "class_id": class_id,
-            "frames_processed": frames_processed,
-            "faces_detected": faces_detected,
+            "frames_processed": diagnostics["frames_sampled"],
+            "faces_detected": diagnostics["faces_detected"],
             "students_identified": len(tracker),
+            "attendance_generation_status": attendance_generation_status,
+            "recognition_eligible_count": diagnostics["recognition_eligible_count"],
+            "recognition_ineligible_count": diagnostics["recognition_ineligible_count"],
+            "students_requiring_reenrollment": diagnostics["students_requiring_reenrollment"],
+            "attendance_not_generated_count": diagnostics["attendance_not_generated_count"],
             "summary": {
                 "present": present,
                 "late_absent": late,
@@ -265,5 +346,15 @@ class CctvAttendancePipeline:
                 }
                 for d in decisions
             ],
+            "ineligible_students": ineligible_diagnostics,
             "reports": report_paths,
+            "diagnostics": diagnostics,
         }
+
+        if not eligible:
+            result["message"] = (
+                "Attendance could not be evaluated: no student in this class has a compatible "
+                "face template. Re-enrolment is required."
+            )
+
+        return result

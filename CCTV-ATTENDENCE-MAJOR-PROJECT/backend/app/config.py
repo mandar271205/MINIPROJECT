@@ -33,11 +33,24 @@ class Config:
 
     MAX_CONTENT_LENGTH = None
 
+    # Legacy names, kept so an existing .env keeps working unchanged.
     FRAME_SAMPLE_EVERY = float(os.getenv("FRAME_SAMPLE_EVERY", "2.0"))
     MATCH_THRESHOLD = float(os.getenv("MATCH_THRESHOLD", "0.55"))
     FLAG_MARGIN = float(os.getenv("FLAG_MARGIN", "0.05"))
     DEEPFACE_MODEL = os.getenv("DEEPFACE_MODEL", "Facenet512")
     DEEPFACE_BACKEND = os.getenv("DEEPFACE_BACKEND", "opencv")
+
+    # Phase 3 explicit recognition configuration. Each falls back to the
+    # legacy key above (never silently to a different value) so existing
+    # deployments keep the same effective threshold/interval unless they
+    # opt in to the new names. Validated once at app startup in
+    # app/__init__.py - invalid values fail loudly, they are never
+    # clamped or silently corrected.
+    FACE_RECOGNITION_PROVIDER = os.getenv("FACE_RECOGNITION_PROVIDER", "insightface_arcface")
+    FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", str(MATCH_THRESHOLD)))
+    FRAME_SAMPLE_INTERVAL_SECONDS = float(
+        os.getenv("FRAME_SAMPLE_INTERVAL_SECONDS", str(FRAME_SAMPLE_EVERY))
+    )
 
     CORS_ORIGINS = _split_origins(os.getenv("CORS_ORIGINS", "http://localhost:5173"))
 

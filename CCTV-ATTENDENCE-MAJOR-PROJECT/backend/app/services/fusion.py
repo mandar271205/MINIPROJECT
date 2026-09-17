@@ -1,7 +1,18 @@
-"""Step 4c – Feature fusion.
+"""DEPRECATED (Phase 3) - not used by the active recognition path.
 
-Concatenates AdaFace (512-D) + Swin-T (512-D) embeddings and projects
-through a learned FC layer to produce a final 512-D descriptor.
+Superseded by ``app/services/recognition_provider.py``
+(``InsightFaceArcFaceProvider``), which produces a single embedding
+directly - there is no fusion step any more. Kept in place, unused,
+rather than deleted, to avoid risking unrelated breakage; see the
+Phase 3 tests that assert this module's classes are never called from
+the active pipeline.
+
+Original docstring, retained for context:
+
+    Step 4c - Feature fusion.
+
+    Concatenates AdaFace (512-D) + Swin-T (512-D) embeddings and projects
+    through a learned FC layer to produce a final 512-D descriptor.
 """
 
 from __future__ import annotations
@@ -69,42 +80,31 @@ class EmbeddingFusion:
         secondary: FaceEmbedding,
     ) -> FaceEmbedding:
         """
-        Concatenate *primary* (AdaFace) and *secondary* (Swin-T)
-        embeddings and project to a single 512-D vector.
+        Fuse *primary* (AdaFace) and *secondary* (Swin-T) embeddings.
+
+        Uses deterministic L2-normalised averaging so that enrollment and
+        recognition produce comparable vectors even when the FC projection
+        layer has not been explicitly trained on a face-recognition dataset.
+        This avoids the "random FC weights" problem where the untrained
+        projection layer maps the same face to a different vector on each call.
         """
-        concat = np.concatenate(
-            [primary.vector, secondary.vector]
-        )  # (1024,)
-        tensor = torch.from_numpy(concat).float().unsqueeze(0).to(self._device)
-        fused = self._model(tensor).cpu().numpy().flatten()
+        # Both vectors are already L2-normalised; average keeps the geometry.
+        avg = (primary.vector + secondary.vector) / 2.0
+        norm = np.linalg.norm(avg)
+        if norm < 1e-8:
+            norm = 1.0
+        fused = (avg / norm).astype(np.float32)
         return FaceEmbedding(
-            vector=fused.astype(np.float32),
+            vector=fused,
             model_name="fused_ada_swin",
         )
 
-    @torch.no_grad()
     def fuse_batch(
         self,
         primaries: list[FaceEmbedding],
         secondaries: list[FaceEmbedding],
     ) -> list[FaceEmbedding]:
         """
-        Batch-fuse multiple embedding pairs.
+        Batch-fuse multiple embedding pairs using deterministic averaging.
         """
-        if not primaries:
-            return []
-
-        concats = [
-            np.concatenate([p.vector, s.vector])
-            for p, s in zip(primaries, secondaries)
-        ]
-        batch = torch.from_numpy(np.stack(concats)).float().to(self._device)
-        fused_batch = self._model(batch).cpu().numpy()
-
-        return [
-            FaceEmbedding(
-                vector=fused_batch[i].astype(np.float32),
-                model_name="fused_ada_swin",
-            )
-            for i in range(len(primaries))
-        ]
+        return [self.fuse(p, s) for p, s in zip(primaries, secondaries)]

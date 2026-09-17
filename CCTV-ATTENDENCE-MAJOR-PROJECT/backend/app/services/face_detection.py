@@ -1,7 +1,17 @@
-"""Step 3 – Face detection & alignment using RetinaFace.
+"""Step 3 - Face detection & alignment using RetinaFace/SCRFD.
 
-Uses the ``insightface`` library for detection and 5-point landmark
-alignment, producing 112 112 BGR face crops suitable for recognition.
+Uses the ``insightface`` library's ``buffalo_l`` pack (SCRFD detector,
+``det_10g.onnx``) for detection and 5-point landmark alignment,
+producing 112x112 BGR face crops suitable for recognition.
+
+Phase 3 change: the previous Haar-cascade fallback and the
+"treat the whole frame as one face" fallback were removed. Both were
+silent behaviours that could fabricate a detection where no real face
+existed, which is exactly what enrolment's zero-face/multi-face
+rejection and the pipeline's real "no face" diagnostic depend on being
+truthful. If the InsightFace detector is unavailable, construction now
+fails loudly (ProviderLoadError) instead of silently degrading to a
+fake detector.
 """
 
 from __future__ import annotations
@@ -11,8 +21,9 @@ import numpy as np
 from skimage import transform as skimage_transform
 
 from .models import FaceDetection, FrameSample
+from .recognition_provider import ProviderLoadError
 
-# Canonical 112 112 destination landmarks (ArcFace standard)
+# Canonical 112x112 destination landmarks (ArcFace standard)
 _ARCFACE_REF = np.array(
     [
         [38.2946, 51.6963],   # left eye
@@ -33,7 +44,7 @@ def _align_face(
     """
     Warp *frame* so that the five facial landmarks land on the
     canonical ArcFace reference positions, producing an aligned
-    *image_size*   *image_size* BGR crop.
+    *image_size* x *image_size* BGR crop.
     """
     dst = _ARCFACE_REF.copy()
     tform = skimage_transform.SimilarityTransform()
@@ -50,11 +61,13 @@ def _align_face(
 
 class RetinaFaceDetector:
     """
-    Face detector powered by InsightFace's *buffalo_l* model pack,
-    which bundles a RetinaFace detector + ArcFace recogniser.
+    Face detector powered by InsightFace's *buffalo_l* model pack
+    (SCRFD detector + landmark models). Only the detector/aligner part
+    is used here; recognition is handled by
+    ``recognition_provider.InsightFaceArcFaceProvider``.
 
-    Only the **detector** part is used here; recognition is handled
-    by the dedicated AdaFace and Swin-T modules.
+    There is no fallback detector. If the InsightFace models fail to
+    load, construction raises ``ProviderLoadError`` immediately.
     """
 
     def __init__(
@@ -62,24 +75,27 @@ class RetinaFaceDetector:
         det_size: tuple[int, int] = (640, 640),
         gpu_id: int = 0,
     ) -> None:
-        from insightface.app import FaceAnalysis
+        try:
+            from insightface.app import FaceAnalysis
+        except Exception as exc:  # pragma: no cover - import failure path
+            raise ProviderLoadError(f"insightface package is not available: {exc}") from exc
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        self._app = FaceAnalysis(
-            name="buffalo_l",
-            root="~/.insightface",
-            providers=providers,
-        )
-        self._app.prepare(ctx_id=gpu_id, det_size=det_size)
+        try:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            self._app = FaceAnalysis(name="buffalo_l", providers=providers)
+            self._app.prepare(ctx_id=gpu_id, det_size=det_size)
+        except Exception as exc:
+            raise ProviderLoadError(f"failed to load InsightFace buffalo_l detector: {exc}") from exc
 
     def detect(self, sample: FrameSample) -> list[FaceDetection]:
         """
         Detect all faces in *sample.frame*, align each one, and
-        return a list of :class:`FaceDetection` objects.
+        return a list of :class:`FaceDetection` objects. Returns an
+        empty list when no face is found - this is a real "no face"
+        result, never a fabricated detection.
         """
-        faces = self._app.get(sample.frame)
         detections: list[FaceDetection] = []
-
+        faces = self._app.get(sample.frame)
         for face in faces:
             bbox = tuple(int(v) for v in face.bbox[:4])
             kps = face.kps.astype(np.float32)       # (5, 2)
@@ -95,7 +111,6 @@ class RetinaFaceDetector:
                     aligned_face=aligned,
                 )
             )
-
         return detections
 
     def detect_raw(self, frame_bgr: np.ndarray) -> list[FaceDetection]:

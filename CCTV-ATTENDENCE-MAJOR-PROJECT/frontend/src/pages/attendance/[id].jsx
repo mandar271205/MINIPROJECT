@@ -11,6 +11,7 @@ const AttendanceReportPage = () => {
   const [sessionInfo, setSessionInfo] = useState(null);
   const [classInfo, setClassInfo] = useState(null);
   const [records, setRecords] = useState([]);
+  const [reenrollmentCount, setReenrollmentCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -30,6 +31,7 @@ const AttendanceReportPage = () => {
         setSessionInfo(response.session);
         setClassInfo(response.class);
         setRecords(response.records || []);
+        setReenrollmentCount(response.students_requiring_reenrollment || 0);
       } catch (requestError) {
         setError(requestError.message);
       } finally {
@@ -128,6 +130,13 @@ const AttendanceReportPage = () => {
                 </div>
               </div>
             </header>
+
+            {reenrollmentCount > 0 ? (
+              <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                Attendance was not generated for {reenrollmentCount} student{reenrollmentCount === 1 ? "" : "s"}{" "}
+                because compatible face templates are unavailable. Re-enrolment is required.
+              </div>
+            ) : null}
 
             <section className="mt-5 grid gap-3 md:grid-cols-3">
               <article className="rounded-xl border border-emerald-200 bg-white p-4 shadow-sm">

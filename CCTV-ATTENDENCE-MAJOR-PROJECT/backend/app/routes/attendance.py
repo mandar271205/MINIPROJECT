@@ -99,6 +99,28 @@ def list_sessions():
     return jsonify({"sessions": [session.to_dict() for session in sessions]})
 
 
+def _recognition_eligibility_summary(class_id: int) -> dict:
+    """Live eligibility summary for a class, using the exact same
+    classifier the pipeline uses (recognition_eligibility.py) - so the
+    API and the actual video-processing run never disagree about which
+    students are eligible."""
+    from ..services.recognition_eligibility import classify_enrolled_students
+    from ..services.recognition_provider import get_provider
+    from ..services.repositories import StudentRepository
+
+    provider = get_provider()
+    enrolled = StudentRepository(db.session).get_enrolled(class_id)
+    eligible, ineligible = classify_enrolled_students(enrolled, provider)
+
+    return {
+        "recognition_eligible_count": len(eligible),
+        "recognition_ineligible_count": len(ineligible),
+        "students_requiring_reenrollment": sum(1 for d in ineligible if d["requires_reenrollment"]),
+        "attendance_not_generated_count": len(ineligible),
+        "ineligible_students": ineligible,
+    }
+
+
 @bp.get("/sessions/<int:session_id>")
 @require_roles("faculty", "hod")
 def get_session(session_id: int):
@@ -124,6 +146,7 @@ def get_session(session_id: int):
             "session": session.to_dict(),
             "class": classroom.to_dict(),
             "records": records,
+            **_recognition_eligibility_summary(session.class_id),
         }
     )
 
@@ -140,6 +163,7 @@ def get_session_status(session_id: int):
             "status": session.processing_status,
             "progress": session.progress_pct,
             "error": session.error_message,
+            **_recognition_eligibility_summary(session.class_id),
         }
     )
 

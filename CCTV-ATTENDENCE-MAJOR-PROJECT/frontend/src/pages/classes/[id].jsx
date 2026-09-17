@@ -374,7 +374,11 @@ const ClassDetailPage = () => {
                   {pollSessionId ? (
                     <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3">
                       <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-red-700">
-                        <span>Current Session: {pollStatus.status}</span>
+                        <span>
+                          {pollStatus.status === "processing"
+                            ? "Processing complete lecture"
+                            : `Current Session: ${pollStatus.status}`}
+                        </span>
                         <span>{pollStatus.progress || 0}%</span>
                       </div>
                       <div className="h-2 rounded-full bg-gray-200">
@@ -383,6 +387,17 @@ const ClassDetailPage = () => {
                           style={{ width: `${pollStatus.progress || 0}%` }}
                         />
                       </div>
+                      {pollStatus.status === "error" && pollStatus.error ? (
+                        <p className="mt-2 text-xs text-red-700">{pollStatus.error}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {!pollSessionId && pollStatus.students_requiring_reenrollment > 0 ? (
+                    <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                      Attendance was not generated for {pollStatus.students_requiring_reenrollment} student
+                      {pollStatus.students_requiring_reenrollment === 1 ? "" : "s"} because compatible face
+                      templates are unavailable. Re-enrolment is required.
                     </div>
                   ) : null}
 

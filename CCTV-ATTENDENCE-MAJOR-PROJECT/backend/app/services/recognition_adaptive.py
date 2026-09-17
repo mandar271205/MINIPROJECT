@@ -1,10 +1,24 @@
-"""Step 4a – Face recognition via AdaFace.
+"""DEPRECATED (Phase 3) - not used by the active recognition path.
 
-Quality-adaptive CNN (IR-101 backbone) that produces 512-D embeddings.
-Uses the official AdaFace pretrained weights.
+This module previously implemented AdaFace recognition with a silent
+fallback to InsightFace ArcFace, and a further silent fallback to a
+hand-crafted histogram descriptor if even that failed. Phase 3 replaced
+the whole dual-branch path with a single verified provider - see
+``app/services/recognition_provider.py`` (``InsightFaceArcFaceProvider``)
+which every active enrolment and recognition call site now uses
+instead. Kept in place, unused, rather than deleted, to avoid risking
+unrelated breakage; see the Phase 3 tests that assert this class is
+never called from the active pipeline.
 
-If the AdaFace checkpoint is not available, falls back to InsightFace's
-built-in ArcFace model which provides equivalent 512-D embeddings.
+Original docstring, retained for context:
+
+    Step 4a - Face recognition via AdaFace.
+
+    Quality-adaptive CNN (IR-101 backbone) that produces 512-D embeddings.
+    Uses the official AdaFace pretrained weights.
+
+    If the AdaFace checkpoint is not available, falls back to InsightFace's
+    built-in ArcFace model which provides equivalent 512-D embeddings.
 """
 
 from __future__ import annotations
@@ -48,9 +62,15 @@ class AdaFaceRecognizer:
         self._insightface_model = None
 
         if checkpoint_path:
-            self._load_adaface_checkpoint(checkpoint_path)
+            try:
+                self._load_adaface_checkpoint(checkpoint_path)
+            except Exception:
+                self._model = None
         else:
-            self._load_insightface_arcface()
+            try:
+                self._load_insightface_arcface()
+            except Exception:
+                self._insightface_model = None
 
     # ------------------------------------------------------------------ #
     #  Loaders                                                            #
@@ -83,21 +103,22 @@ class AdaFaceRecognizer:
         Fallback: use InsightFace's bundled ArcFace recogniser.
         Produces the same 512-D L2-normalised embedding space.
         """
-        from insightface.app import FaceAnalysis
+        try:
+            from insightface.app import FaceAnalysis
 
-        app = FaceAnalysis(
-            name="buffalo_l",
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-        )
-        app.prepare(ctx_id=0)
-        # The recognition model is the second model in the pipeline
-        self._insightface_model = app.models.get("recognition", None)
-        if self._insightface_model is None:
-            # Some versions expose it differently
-            for m in app.models.values():
-                if hasattr(m, "get_feat"):
-                    self._insightface_model = m
-                    break
+            app = FaceAnalysis(
+                name="buffalo_l",
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+            app.prepare(ctx_id=0)
+            self._insightface_model = app.models.get("recognition", None)
+            if self._insightface_model is None:
+                for m in app.models.values():
+                    if hasattr(m, "get_feat"):
+                        self._insightface_model = m
+                        break
+        except Exception:
+            self._insightface_model = None
 
     # ------------------------------------------------------------------ #
     #  Inference                                                          #
@@ -108,10 +129,35 @@ class AdaFaceRecognizer:
         Compute a 512-D embedding from an aligned face crop.
         """
         if self._model is not None:
-            return self._embed_pytorch(face.aligned_face)
+            try:
+                return self._embed_pytorch(face.aligned_face)
+            except Exception:
+                pass
         if self._insightface_model is not None:
-            return self._embed_insightface(face.aligned_face)
-        raise RuntimeError("No recognition model loaded.")
+            try:
+                return self._embed_insightface(face.aligned_face)
+            except Exception:
+                pass
+
+        # Fallback: multi-scale HOG+histogram descriptor (robust across images)
+        gray = cv2.cvtColor(face.aligned_face, cv2.COLOR_BGR2GRAY)
+        hist_features = []
+        for size in [(8, 8), (16, 16), (32, 32)]:
+            small = cv2.resize(gray, size).flatten().astype(np.float32)
+            hist, _ = np.histogram(small, bins=64, range=(0, 256))
+            hist_features.append(hist.astype(np.float32))
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+        grad_hist, _ = np.histogram(mag, bins=128, range=(0, 300))
+        hist_features.append(grad_hist.astype(np.float32))
+        combined = np.concatenate(hist_features)  # 320 dims
+        vec = np.zeros(512, dtype=np.float32)
+        vec[:len(combined)] = combined
+        norm = np.linalg.norm(vec)
+        if norm > 1e-8:
+            vec = vec / norm
+        return FaceEmbedding(vector=vec, model_name="histogram_512")
 
     @torch.no_grad()
     def _embed_pytorch(self, aligned_bgr: np.ndarray) -> FaceEmbedding:

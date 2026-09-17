@@ -23,7 +23,11 @@ class StudentRepository:
 
     def get_enrolled(self, class_id: int) -> list[EnrolledStudent]:
         """
-        Return all students for *class_id* that have a stored embedding.
+        Return all students for *class_id* that have a stored embedding,
+        tagged with the exact model id/dimension it was generated with.
+        Compatibility filtering happens downstream (see
+        recognition_provider.InsightFaceArcFaceProvider.is_compatible());
+        this method never decides compatibility itself.
         """
         from ..models.student import Student  # deferred to avoid circular imports
 
@@ -35,7 +39,7 @@ class StudentRepository:
 
         enrolled: list[EnrolledStudent] = []
         for s in students:
-            raw = getattr(s, "embedding", None) or getattr(s, "face_embedding", None)
+            raw = getattr(s, "face_embedding", None)
             if raw is None:
                 continue
             enrolled.append(
@@ -44,6 +48,9 @@ class StudentRepository:
                     name=s.name,
                     class_id=class_id,
                     embedding=np.array(raw, dtype=np.float32),
+                    model_id=s.face_model,
+                    embedding_dimension=s.embedding_dimension,
+                    embedding_status=s.embedding_status,
                 )
             )
         return enrolled
@@ -72,8 +79,7 @@ class AttendanceRepository:
                 session_id=session_id,
                 student_id=a.student_id,
                 status="detected",
-                first_seen_ts=a.first_seen_sec,
-                confidence=a.confidence,
+                detected_at_seconds=a.first_seen_sec,
                 flagged=False,
             )
             self._session.add(record)
@@ -100,8 +106,7 @@ class AttendanceRepository:
                 session_id=session_id,
                 student_id=d.student_id,
                 status=d.status,
-                first_seen_ts=d.first_seen_sec,
-                confidence=d.confidence,
+                detected_at_seconds=d.first_seen_sec,
                 flagged=False,
             )
             self._session.add(record)
@@ -109,7 +114,7 @@ class AttendanceRepository:
         # Update session status
         session = self._session.query(AttendanceSession).get(session_id)
         if session:
-            session.status = "done"
+            session.processing_status = "done"
 
         self._session.commit()
 
@@ -123,5 +128,6 @@ class AttendanceRepository:
 
         session = self._session.query(AttendanceSession).get(session_id)
         if session:
-            session.status = "error"
+            session.processing_status = "error"
+            session.error_message = error_message
         self._session.commit()
