@@ -8,6 +8,7 @@ from werkzeug.exceptions import HTTPException
 from .config import Config
 from .extensions import bcrypt, db, jwt, migrate
 from .routes import academic_bp, admin_bp, attendance_bp, auth_bp, classes_bp, faculty_bp, reports_bp, student_bp
+from .utils.config_validation import validate_all as validate_recognition_and_tracking_config
 from .utils.errors import DomainError
 from .utils.responses import error as error_response
 from .utils.seed import ensure_default_hod
@@ -21,24 +22,11 @@ def create_app() -> Flask:
     if not app.config.get("SQLALCHEMY_DATABASE_URI"):
         raise RuntimeError("DATABASE_URL is not set. Add it to your .env file.")
 
-    # Phase 3: fail loudly at startup on invalid recognition config
-    # instead of letting a bad value surface later as a confusing job
-    # failure, and never silently fall back to a different provider.
-    if app.config["FACE_RECOGNITION_PROVIDER"] != "insightface_arcface":
-        raise RuntimeError(
-            "FACE_RECOGNITION_PROVIDER must be 'insightface_arcface' - "
-            f"got {app.config['FACE_RECOGNITION_PROVIDER']!r}"
-        )
-    if not (0.0 < app.config["FACE_MATCH_THRESHOLD"] < 1.0):
-        raise RuntimeError(
-            "FACE_MATCH_THRESHOLD must be strictly between 0 and 1 - "
-            f"got {app.config['FACE_MATCH_THRESHOLD']!r}"
-        )
-    if not (app.config["FRAME_SAMPLE_INTERVAL_SECONDS"] > 0.0):
-        raise RuntimeError(
-            "FRAME_SAMPLE_INTERVAL_SECONDS must be greater than zero - "
-            f"got {app.config['FRAME_SAMPLE_INTERVAL_SECONDS']!r}"
-        )
+    # Fail loudly at startup on invalid recognition/tracking/voting
+    # config instead of letting a bad value surface later as a
+    # confusing job failure, and never silently substitute a different
+    # provider or an unsafe default.
+    validate_recognition_and_tracking_config(app.config)
 
     db.init_app(app)
     migrate.init_app(app, db)

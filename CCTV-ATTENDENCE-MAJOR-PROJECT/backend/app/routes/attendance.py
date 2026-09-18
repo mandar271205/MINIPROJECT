@@ -6,9 +6,13 @@ from ..extensions import db
 from ..models.attendance import AttendanceSession
 from ..models.classroom import Classroom
 from ..services.attendance_service import start_processing
+from ..utils.errors import DomainError
 from ..utils.files import ALLOWED_VIDEO_EXTENSIONS, allowed_extension, save_upload
+from ..utils.responses import success
 from ..utils.security import require_roles
 from ..utils.time import parse_datetime, utc_now
+
+MAX_OBSERVATIONS_PER_PAGE = 200
 
 bp = Blueprint("attendance", __name__)
 
@@ -164,6 +168,84 @@ def get_session_status(session_id: int):
             "progress": session.progress_pct,
             "error": session.error_message,
             **_recognition_eligibility_summary(session.class_id),
+        }
+    )
+
+
+@bp.get("/sessions/<int:session_id>/recognition-evidence")
+@require_roles("faculty", "hod")
+def get_recognition_evidence(session_id: int):
+    """Phase 4 diagnostic view of face tracks and their voting
+    outcomes for one session. Same RBAC as the rest of this blueprint:
+    HOD sees any session, faculty only their own classes' sessions
+    (_get_session_or_error already enforces this), students cannot
+    reach this endpoint at all (not in @require_roles). Never exposes
+    raw embeddings, images, or filesystem paths - see
+    FaceTrack.to_diagnostic_dict()."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.observation_persistence import ObservationPersistence
+
+    tracks = ObservationPersistence(db.session).get_tracks(session_id)
+
+    summary = {
+        "total_tracks": len(tracks),
+        "confirmed_tracks": sum(1 for t in tracks if t.track_state == "CONFIRMED"),
+        "unconfirmed_tracks": sum(1 for t in tracks if t.track_state in ("UNCONFIRMED", "CLOSED")),
+        "unknown_tracks": sum(1 for t in tracks if t.track_state == "UNKNOWN"),
+        "ambiguous_tracks": sum(1 for t in tracks if t.track_state == "AMBIGUOUS"),
+        "identity_conflict_tracks": sum(1 for t in tracks if t.identity_conflict),
+        "total_observations": sum(t.observation_count for t in tracks),
+    }
+
+    return success(
+        {
+            "session_id": session_id,
+            "summary": summary,
+            "tracks": [t.to_diagnostic_dict() for t in tracks],
+        }
+    )
+
+
+@bp.get("/sessions/<int:session_id>/tracks/<int:track_id>/observations")
+@require_roles("faculty", "hod")
+def get_track_observations(session_id: int, track_id: int):
+    """Paginated recognition observations for one track. Same
+    authorization boundary as recognition-evidence above. Never
+    exposes raw embeddings, images, or filesystem paths - see
+    RecognitionObservation.to_safe_dict()."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..models.observation import FaceTrack
+
+    track = FaceTrack.query.filter_by(id=track_id, session_id=session_id).first()
+    if not track:
+        raise DomainError("NOT_FOUND", "Track not found", 404)
+
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    if page < 1:
+        raise DomainError("VALIDATION_ERROR", "page must be >= 1", 400)
+    if per_page < 1:
+        raise DomainError("VALIDATION_ERROR", "per_page must be >= 1", 400)
+    per_page = min(per_page, MAX_OBSERVATIONS_PER_PAGE)
+
+    from ..services.observation_persistence import ObservationPersistence
+
+    items, total = ObservationPersistence(db.session).get_observations_page(session_id, track_id, page, per_page)
+
+    return success(
+        {
+            "session_id": session_id,
+            "track_id": track_id,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "observations": [o.to_safe_dict() for o in items],
         }
     )
 

@@ -46,12 +46,25 @@ def _process_session(app, session_id: int) -> None:
                     db.session.rollback()
 
         try:
+            from .observation_persistence import ObservationPersistence
+
             pipeline = CctvAttendancePipeline(
                 student_repo=StudentRepository(db.session),
                 attendance_repo=AttendanceRepository(db.session),
+                observation_persistence=ObservationPersistence(db.session),
                 frame_interval=float(app.config["FRAME_SAMPLE_INTERVAL_SECONDS"]),
                 match_threshold=float(app.config["FACE_MATCH_THRESHOLD"]),
                 grace_period_minutes=session.classroom.grace_period_minutes,
+                track_max_gap_seconds=float(app.config["TRACK_MAX_GAP_SECONDS"]),
+                track_min_iou=float(app.config["TRACK_MIN_IOU"]),
+                track_max_centroid_distance=float(app.config["TRACK_MAX_CENTROID_DISTANCE"]),
+                track_close_after_seconds=float(app.config["TRACK_CLOSE_AFTER_SECONDS"]),
+                identity_vote_window_size=int(app.config["IDENTITY_VOTE_WINDOW_SIZE"]),
+                identity_min_support=int(app.config["IDENTITY_MIN_SUPPORT"]),
+                identity_min_support_ratio=float(app.config["IDENTITY_MIN_SUPPORT_RATIO"]),
+                identity_min_mean_confidence=float(app.config["IDENTITY_MIN_MEAN_CONFIDENCE"]),
+                identity_min_margin=float(app.config["IDENTITY_MIN_MARGIN"]),
+                identity_conflict_support=int(app.config["IDENTITY_CONFLICT_SUPPORT"]),
             )
 
             results = pipeline.run(

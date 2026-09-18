@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import StatusBadge from "@/components/StatusBadge";
-import { downloadPDF, downloadXLSX, getSession } from "@/lib/api";
+import { downloadPDF, downloadXLSX, getRecognitionEvidence, getSession, getTrackObservations } from "@/lib/api";
+import { getTokenUser } from "@/lib/auth";
 
 const AttendanceReportPage = () => {
   const { id } = useParams();
@@ -14,6 +15,18 @@ const AttendanceReportPage = () => {
   const [reenrollmentCount, setReenrollmentCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  const isStudent = getTokenUser()?.role === "student";
+
+  const [evidence, setEvidence] = useState(null);
+  const [evidenceLoading, setEvidenceLoading] = useState(true);
+  const [evidenceError, setEvidenceError] = useState("");
+  const [expandedTrackId, setExpandedTrackId] = useState(null);
+  const [observations, setObservations] = useState([]);
+  const [observationsPage, setObservationsPage] = useState(1);
+  const [observationsTotal, setObservationsTotal] = useState(0);
+  const [observationsLoading, setObservationsLoading] = useState(false);
+  const OBSERVATIONS_PER_PAGE = 20;
 
   useEffect(() => {
     const load = async () => {
@@ -41,6 +54,52 @@ const AttendanceReportPage = () => {
 
     load();
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!Number.isInteger(sessionId) || isStudent) {
+      setEvidenceLoading(false);
+      return;
+    }
+
+    const loadEvidence = async () => {
+      setEvidenceLoading(true);
+      setEvidenceError("");
+      try {
+        const data = await getRecognitionEvidence(sessionId);
+        setEvidence(data);
+      } catch (requestError) {
+        setEvidenceError(requestError.message);
+      } finally {
+        setEvidenceLoading(false);
+      }
+    };
+
+    loadEvidence();
+  }, [sessionId, isStudent]);
+
+  const toggleTrackObservations = async (trackId) => {
+    if (expandedTrackId === trackId) {
+      setExpandedTrackId(null);
+      return;
+    }
+    setExpandedTrackId(trackId);
+    setObservationsPage(1);
+    await loadObservationsPage(trackId, 1);
+  };
+
+  const loadObservationsPage = async (trackId, page) => {
+    setObservationsLoading(true);
+    try {
+      const data = await getTrackObservations(sessionId, trackId, { page, perPage: OBSERVATIONS_PER_PAGE });
+      setObservations(data.observations || []);
+      setObservationsTotal(data.total || 0);
+      setObservationsPage(page);
+    } catch (requestError) {
+      setEvidenceError(requestError.message);
+    } finally {
+      setObservationsLoading(false);
+    }
+  };
 
   const summary = useMemo(() => {
     const present = records.filter((item) => item.status === "PRESENT").length;
@@ -205,6 +264,192 @@ const AttendanceReportPage = () => {
                 </div>
               )}
             </section>
+
+            {!isStudent ? (
+              <section className="mt-5 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                <h2 className="mb-3 text-lg font-semibold">Recognition Evidence</h2>
+                <p className="mb-3 text-xs text-gray-500">
+                  Temporary face tracks and multi-observation voting outcomes for this session -
+                  diagnostic evidence, not a final attendance decision.
+                </p>
+
+                {evidenceLoading ? (
+                  <p className="text-sm text-gray-600">Loading recognition evidence...</p>
+                ) : null}
+
+                {!evidenceLoading && evidenceError ? (
+                  /permission|forbidden|403|401/i.test(evidenceError) ? (
+                    <p className="text-sm text-gray-600">
+                      You do not have permission to view recognition evidence for this session.
+                    </p>
+                  ) : (
+                    <p className="text-sm text-red-700">{evidenceError}</p>
+                  )
+                ) : null}
+
+                {!evidenceLoading && !evidenceError && evidence ? (
+                  <>
+                    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-2xl font-bold text-gray-900">{evidence.summary.total_tracks}</p>
+                        <p className="text-xs text-gray-500">Total Tracks</p>
+                      </div>
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-center">
+                        <p className="text-2xl font-bold text-emerald-700">{evidence.summary.confirmed_tracks}</p>
+                        <p className="text-xs text-emerald-700">Confirmed</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-2xl font-bold text-gray-700">{evidence.summary.unknown_tracks}</p>
+                        <p className="text-xs text-gray-500">Unknown</p>
+                      </div>
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-center">
+                        <p className="text-2xl font-bold text-amber-700">{evidence.summary.ambiguous_tracks}</p>
+                        <p className="text-xs text-amber-700">Ambiguous</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-2xl font-bold text-gray-900">{evidence.summary.total_observations}</p>
+                        <p className="text-xs text-gray-500">Observations</p>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-gray-200 text-left text-gray-600">
+                            <th className="px-3 py-2">Track</th>
+                            <th className="px-3 py-2">State</th>
+                            <th className="px-3 py-2">Confirmed Student</th>
+                            <th className="px-3 py-2">Mean Confidence</th>
+                            <th className="px-3 py-2">First / Last Seen</th>
+                            <th className="px-3 py-2">Conflict</th>
+                            <th className="px-3 py-2">Observations</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {evidence.tracks.map((track) => (
+                            <>
+                              <tr key={track.track_id} className="border-b border-gray-100">
+                                <td className="px-3 py-2 text-gray-500">{track.track_key}</td>
+                                <td className="px-3 py-2">
+                                  <StatusBadge status={track.state} />
+                                </td>
+                                <td className="px-3 py-2">
+                                  {track.confirmed_student_id ? `#${track.confirmed_student_id}` : "-"}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {track.mean_confidence != null ? track.mean_confidence.toFixed(2) : "-"}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-gray-500">
+                                  {track.first_seen_seconds.toFixed(1)}s - {track.last_seen_seconds.toFixed(1)}s
+                                </td>
+                                <td className="px-3 py-2">
+                                  {track.identity_conflict ? (
+                                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">
+                                      Conflict
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-gray-400">-</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleTrackObservations(track.track_id)}
+                                    className="rounded-md border border-[#C10202] px-2 py-1 text-xs font-semibold text-[#C10202] transition hover:bg-red-50"
+                                  >
+                                    {expandedTrackId === track.track_id ? "Hide" : `View (${track.observation_count})`}
+                                  </button>
+                                </td>
+                              </tr>
+                              {expandedTrackId === track.track_id ? (
+                                <tr key={`${track.track_id}-observations`}>
+                                  <td colSpan={7} className="bg-gray-50 px-3 py-3">
+                                    {observationsLoading ? (
+                                      <p className="text-xs text-gray-500">Loading observations...</p>
+                                    ) : (
+                                      <>
+                                        <div className="max-h-64 overflow-auto">
+                                          <table className="min-w-full text-xs">
+                                            <thead>
+                                              <tr className="text-left text-gray-500">
+                                                <th className="px-2 py-1">Timestamp</th>
+                                                <th className="px-2 py-1">Evidence State</th>
+                                                <th className="px-2 py-1">Top-1</th>
+                                                <th className="px-2 py-1">Top-1 Sim</th>
+                                                <th className="px-2 py-1">Margin</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {observations.map((obs) => (
+                                                <tr key={obs.id} className="border-t border-gray-200">
+                                                  <td className="px-2 py-1">{obs.timestamp_seconds.toFixed(1)}s</td>
+                                                  <td className="px-2 py-1">{obs.evidence_state}</td>
+                                                  <td className="px-2 py-1">
+                                                    {obs.top1_student_id ? `#${obs.top1_student_id}` : "-"}
+                                                  </td>
+                                                  <td className="px-2 py-1">
+                                                    {obs.top1_similarity != null ? obs.top1_similarity.toFixed(3) : "-"}
+                                                  </td>
+                                                  <td className="px-2 py-1">
+                                                    {obs.similarity_margin != null ? obs.similarity_margin.toFixed(3) : "-"}
+                                                  </td>
+                                                </tr>
+                                              ))}
+                                              {observations.length === 0 ? (
+                                                <tr>
+                                                  <td colSpan={5} className="px-2 py-3 text-center text-gray-500">
+                                                    No observations recorded.
+                                                  </td>
+                                                </tr>
+                                              ) : null}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                        <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+                                          <span>
+                                            Page {observationsPage} of{" "}
+                                            {Math.max(1, Math.ceil(observationsTotal / OBSERVATIONS_PER_PAGE))}
+                                          </span>
+                                          <div className="flex gap-2">
+                                            <button
+                                              type="button"
+                                              disabled={observationsPage <= 1}
+                                              onClick={() => loadObservationsPage(track.track_id, observationsPage - 1)}
+                                              className="rounded border border-gray-300 px-2 py-1 disabled:opacity-40"
+                                            >
+                                              Prev
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={observationsPage * OBSERVATIONS_PER_PAGE >= observationsTotal}
+                                              onClick={() => loadObservationsPage(track.track_id, observationsPage + 1)}
+                                              className="rounded border border-gray-300 px-2 py-1 disabled:opacity-40"
+                                            >
+                                              Next
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </>
+                                    )}
+                                  </td>
+                                </tr>
+                              ) : null}
+                            </>
+                          ))}
+                          {evidence.tracks.length === 0 ? (
+                            <tr>
+                              <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+                                No face tracks recorded for this session yet.
+                              </td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : null}
+              </section>
+            ) : null}
           </>
         ) : null}
       </div>

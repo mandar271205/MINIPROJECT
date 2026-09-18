@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .models import EnrolledStudent, FaceEmbedding, MatchResult
+from .models import EnrolledStudent, FaceEmbedding, MatchEvidence, MatchResult
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -83,6 +83,71 @@ def match_face(
         student_name=None,
         similarity=best_sim,
         is_match=False,
+    )
+
+
+def match_face_evidence(
+    query: FaceEmbedding,
+    enrolled: list[EnrolledStudent],
+    threshold: float = 0.55,
+) -> MatchEvidence:
+    """
+    Phase 4 - full top-1/top-2 evidence for one detection, for feeding
+    into a face track's sliding-window vote (identity_voting.py).
+
+    Never itself decides identity. Does not silently lower *threshold*
+    - `above_threshold` simply reports whether the top-1 candidate
+    cleared the caller-supplied value as-is.
+
+    Handles safely:
+      - no compatible templates -> all fields None, above_threshold=False
+      - exactly one compatible template -> top2 fields None, margin None
+      - a non-finite query vector -> all fields None, above_threshold=False
+        (this is a defensive check; callers should already validate the
+        embedding before calling)
+      - tied similarities -> deterministic (stable sort keeps the
+        earliest-indexed enrolled student as the higher-ranked one)
+    """
+    if not enrolled or not np.all(np.isfinite(query.vector)):
+        return MatchEvidence(
+            top1_student_id=None, top1_similarity=None,
+            top2_student_id=None, top2_similarity=None,
+            similarity_margin=None, above_threshold=False,
+        )
+
+    db_matrix = np.stack([s.embedding for s in enrolled])
+    q = query.vector.reshape(1, -1)
+
+    q_norm = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-8)
+    db_norm = db_matrix / (np.linalg.norm(db_matrix, axis=1, keepdims=True) + 1e-8)
+
+    similarities = (q_norm @ db_norm.T).flatten()
+
+    # Stable sort: for tied similarities, the lower original index (the
+    # earlier enrolled student) is ranked first - deterministic given a
+    # fixed enrolled-list order.
+    order = np.argsort(-similarities, kind="stable")
+
+    top1_idx = int(order[0])
+    top1_sim = float(similarities[top1_idx])
+    top1_student = enrolled[top1_idx]
+
+    top2_student_id = None
+    top2_sim = None
+    margin = None
+    if len(enrolled) > 1:
+        top2_idx = int(order[1])
+        top2_sim = float(similarities[top2_idx])
+        top2_student_id = enrolled[top2_idx].student_id
+        margin = top1_sim - top2_sim
+
+    return MatchEvidence(
+        top1_student_id=top1_student.student_id,
+        top1_similarity=top1_sim,
+        top2_student_id=top2_student_id,
+        top2_similarity=top2_sim,
+        similarity_margin=margin,
+        above_threshold=top1_sim >= threshold,
     )
 
 

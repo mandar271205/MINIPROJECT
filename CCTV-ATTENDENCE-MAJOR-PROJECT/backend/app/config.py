@@ -52,6 +52,25 @@ class Config:
         os.getenv("FRAME_SAMPLE_INTERVAL_SECONDS", str(FRAME_SAMPLE_EVERY))
     )
 
+    # Phase 4 - temporary face-track association. Validated once at app
+    # startup in app/__init__.py; invalid values fail loudly, never
+    # silently substituted with an unsafe default.
+    TRACK_MAX_GAP_SECONDS = float(os.getenv("TRACK_MAX_GAP_SECONDS", "3.0"))
+    TRACK_MIN_IOU = float(os.getenv("TRACK_MIN_IOU", "0.3"))
+    TRACK_MAX_CENTROID_DISTANCE = float(os.getenv("TRACK_MAX_CENTROID_DISTANCE", "80.0"))
+    TRACK_CLOSE_AFTER_SECONDS = float(os.getenv("TRACK_CLOSE_AFTER_SECONDS", "6.0"))
+
+    # Phase 4 - sliding-window identity voting. Development defaults
+    # only, not scientifically calibrated - real calibration requires
+    # labelled footage. See app/services/identity_voting.py.
+    IDENTITY_VOTE_WINDOW_SIZE = int(os.getenv("IDENTITY_VOTE_WINDOW_SIZE", "5"))
+    IDENTITY_MIN_SUPPORT = int(os.getenv("IDENTITY_MIN_SUPPORT", "3"))
+    IDENTITY_MIN_SUPPORT_RATIO = float(os.getenv("IDENTITY_MIN_SUPPORT_RATIO", "0.60"))
+    IDENTITY_MIN_MEAN_CONFIDENCE = float(os.getenv("IDENTITY_MIN_MEAN_CONFIDENCE", str(FACE_MATCH_THRESHOLD)))
+    IDENTITY_MIN_MARGIN = float(os.getenv("IDENTITY_MIN_MARGIN", "0.03"))
+    IDENTITY_CONFLICT_SUPPORT = int(os.getenv("IDENTITY_CONFLICT_SUPPORT", "2"))
+    IDENTITY_UNLOCK_POLICY = os.getenv("IDENTITY_UNLOCK_POLICY", "never")
+
     CORS_ORIGINS = _split_origins(os.getenv("CORS_ORIGINS", "http://localhost:5173"))
 
     DEFAULT_HOD_NAME = os.getenv("DEFAULT_HOD_NAME", "HOD Admin")

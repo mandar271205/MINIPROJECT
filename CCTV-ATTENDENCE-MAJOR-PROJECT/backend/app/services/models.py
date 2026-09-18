@@ -43,6 +43,22 @@ class MatchResult:
 
 
 @dataclass
+class MatchEvidence:
+    """Phase 4 - full top-1/top-2 matching evidence for one detection.
+
+    Deliberately does not itself decide identity: a single call
+    producing above_threshold=True is evidence to feed into a face
+    track's sliding-window vote, never an immediate attendance
+    decision by itself."""
+    top1_student_id: int | None
+    top1_similarity: float | None
+    top2_student_id: int | None
+    top2_similarity: float | None
+    similarity_margin: float | None
+    above_threshold: bool
+
+
+@dataclass
 class FirstAppearance:
     """Earliest sighting of a student in the video."""
     student_id: int

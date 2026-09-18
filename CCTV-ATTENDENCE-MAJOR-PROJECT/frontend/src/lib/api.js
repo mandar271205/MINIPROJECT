@@ -155,6 +155,18 @@ export const getSession = async (sessionId) => request(`/api/attendance/sessions
 
 export const getSessionStatus = async (sessionId) => request(`/api/attendance/sessions/${sessionId}/status`);
 
+// --- Phase 4: recognition evidence (tracks/observations) ------------------
+
+export const getRecognitionEvidence = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/recognition-evidence`)).data;
+
+export const getTrackObservations = async (sessionId, trackId, { page = 1, perPage = 50 } = {}) =>
+  (
+    await request(
+      `/api/attendance/sessions/${sessionId}/tracks/${trackId}/observations?page=${page}&per_page=${perPage}`,
+    )
+  ).data;
+
 export const downloadXLSX = async (sessionId) =>
   request(`/api/reports/${sessionId}/xlsx`, {
     responseType: "blob",
