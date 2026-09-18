@@ -122,7 +122,15 @@ def _recognition_eligibility_summary(class_id: int) -> dict:
         "students_requiring_reenrollment": sum(1 for d in ineligible if d["requires_reenrollment"]),
         "attendance_not_generated_count": len(ineligible),
         "ineligible_students": ineligible,
+        "eligible_student_ids": [s.student_id for s in eligible],
     }
+
+
+def _public_eligibility_fields(summary: dict) -> dict:
+    """Strips internal-only keys (not meant for the plain
+    get_session/get_session_status responses) before spreading into
+    their JSON payload."""
+    return {k: v for k, v in summary.items() if k != "eligible_student_ids"}
 
 
 @bp.get("/sessions/<int:session_id>")
@@ -150,7 +158,7 @@ def get_session(session_id: int):
             "session": session.to_dict(),
             "class": classroom.to_dict(),
             "records": records,
-            **_recognition_eligibility_summary(session.class_id),
+            **_public_eligibility_fields(_recognition_eligibility_summary(session.class_id)),
         }
     )
 
@@ -167,7 +175,7 @@ def get_session_status(session_id: int):
             "status": session.processing_status,
             "progress": session.progress_pct,
             "error": session.error_message,
-            **_recognition_eligibility_summary(session.class_id),
+            **_public_eligibility_fields(_recognition_eligibility_summary(session.class_id)),
         }
     )
 
@@ -248,6 +256,155 @@ def get_track_observations(session_id: int, track_id: int):
             "observations": [o.to_safe_dict() for o in items],
         }
     )
+
+
+def _presence_response(session: AttendanceSession) -> dict:
+    """Builds the GET .../presence payload from persisted
+    presence_windows rows plus the live eligibility summary - never
+    re-running reconstruction itself (that only ever happens via the
+    trigger endpoint or automatically post-EOF)."""
+    from ..models.presence import PresenceWindow
+
+    eligibility = _recognition_eligibility_summary(session.class_id)
+    windows = (
+        PresenceWindow.query.filter_by(session_id=session.id)
+        .order_by(PresenceWindow.student_id, PresenceWindow.window_index)
+        .all()
+    )
+
+    windows_by_student: dict[int, list] = {}
+    for w in windows:
+        windows_by_student.setdefault(w.student_id, []).append(w)
+
+    student_summaries = []
+    for student_id, student_windows in windows_by_student.items():
+        total_presence = sum(w.total_duration_seconds for w in student_windows)
+        valid_seconds = session.valid_duration_seconds
+        percentage = None
+        if valid_seconds and valid_seconds > 0:
+            percentage = round(min(100.0, max(0.0, (total_presence / valid_seconds) * 100.0)), 4)
+        confidences = [w.mean_confidence for w in student_windows if w.mean_confidence is not None]
+        student_summaries.append(
+            {
+                "student_id": student_id,
+                "eligible_for_reconstruction": True,
+                "window_count": len(student_windows),
+                "observation_count": sum(w.observation_count for w in student_windows),
+                "observed_presence_seconds": sum(w.observed_duration_seconds for w in student_windows),
+                "inferred_gap_seconds": sum(w.inferred_gap_seconds for w in student_windows),
+                "total_presence_seconds": total_presence,
+                "valid_session_seconds": valid_seconds,
+                "presence_percentage": percentage,
+                "first_confirmed_presence_seconds": student_windows[0].start_seconds,
+                "last_confirmed_presence_seconds": student_windows[-1].end_seconds,
+                "mean_confidence": (sum(confidences) / len(confidences)) if confidences else None,
+                "algorithm_version": student_windows[0].algorithm_version,
+                "windows": [w.to_dict() for w in student_windows],
+            }
+        )
+
+    # Eligible students with zero windows (no trusted evidence at all)
+    # still need an explicit zero-presence entry, not silent omission.
+    covered_student_ids = set(windows_by_student.keys())
+    for entry in eligibility.get("eligible_student_ids", []):
+        if entry not in covered_student_ids:
+            student_summaries.append(
+                {
+                    "student_id": entry,
+                    "eligible_for_reconstruction": True,
+                    "window_count": 0,
+                    "observation_count": 0,
+                    "observed_presence_seconds": 0.0,
+                    "inferred_gap_seconds": 0.0,
+                    "total_presence_seconds": 0.0,
+                    "valid_session_seconds": session.valid_duration_seconds,
+                    "presence_percentage": 0.0 if session.valid_duration_seconds else None,
+                    "first_confirmed_presence_seconds": None,
+                    "last_confirmed_presence_seconds": None,
+                    "mean_confidence": None,
+                    "algorithm_version": session.presence_algorithm_version,
+                    "windows": [],
+                }
+            )
+
+    return {
+        "session_id": session.id,
+        "reconstruction_status": session.presence_reconstruction_status,
+        "reconstruction_error": session.presence_reconstruction_error,
+        "actual_duration_seconds": session.actual_duration_seconds,
+        "valid_duration_seconds": session.valid_duration_seconds,
+        "algorithm_version": session.presence_algorithm_version,
+        "reconstructed_at": (
+            session.presence_reconstructed_at.isoformat() if session.presence_reconstructed_at else None
+        ),
+        "students": student_summaries,
+        "ineligible_students": [
+            {
+                "student_id": d["student_id"],
+                "eligible_for_reconstruction": False,
+                "presence_calculated": False,
+                "requires_reenrollment": d["requires_reenrollment"],
+                "reason_code": d["reason_code"],
+            }
+            for d in eligibility["ineligible_students"]
+        ],
+    }
+
+
+@bp.get("/sessions/<int:session_id>/presence")
+@require_roles("faculty", "hod")
+def get_session_presence(session_id: int):
+    """Phase 5 explainable presence view. Same RBAC boundary as
+    recognition-evidence: HOD any session, faculty only their own
+    classes (_get_session_or_error enforces this), students never (not
+    in @require_roles). Never exposes raw embeddings/images/paths -
+    only aggregated durations, percentages, and window boundaries."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    return success(_presence_response(session))
+
+
+@bp.get("/sessions/<int:session_id>/students/<int:student_id>/presence")
+@require_roles("faculty", "hod")
+def get_student_session_presence(session_id: int, student_id: int):
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    data = _presence_response(session)
+    entry = next((s for s in data["students"] if s["student_id"] == student_id), None)
+    if entry is None:
+        entry = next((s for s in data["ineligible_students"] if s["student_id"] == student_id), None)
+    if entry is None:
+        raise DomainError("NOT_FOUND", "No presence data for this student in this session", 404)
+
+    return success({"session_id": session_id, "student": entry})
+
+
+@bp.post("/sessions/<int:session_id>/reconstruct-presence")
+@require_roles("faculty", "hod")
+def reconstruct_presence(session_id: int):
+    """Manual re-run trigger. HOD or the owning faculty may trigger;
+    the same _get_session_or_error boundary as every other endpoint in
+    this blueprint denies anyone else (students are excluded entirely
+    by @require_roles). Guarded against concurrent reconstruction of
+    the same session by presence_service's own status check."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.presence_service import PresenceReconstructionNotAllowed, run_presence_reconstruction
+
+    try:
+        result = run_presence_reconstruction(session_id)
+    except PresenceReconstructionNotAllowed as exc:
+        raise DomainError("RECONSTRUCTION_NOT_ALLOWED", str(exc), 409)
+    except Exception as exc:
+        raise DomainError("RECONSTRUCTION_FAILED", "Presence reconstruction failed", 500) from exc
+
+    return success(result, "Presence reconstruction complete")
 
 
 @bp.post("/sessions/<int:session_id>/set-start-time")

@@ -2,6 +2,22 @@ from datetime import datetime, timezone
 
 from ..extensions import db
 
+# Phase 5 - processing states for presence reconstruction. These are
+# job/processing states, never attendance statuses.
+PRESENCE_STATUS_NOT_STARTED = "NOT_STARTED"
+PRESENCE_STATUS_PROCESSING = "PROCESSING"
+PRESENCE_STATUS_COMPLETED = "COMPLETED"
+PRESENCE_STATUS_FAILED = "FAILED"
+PRESENCE_STATUS_PARTIAL_EVIDENCE = "PARTIAL_EVIDENCE"
+
+PRESENCE_RECONSTRUCTION_STATUSES = (
+    PRESENCE_STATUS_NOT_STARTED,
+    PRESENCE_STATUS_PROCESSING,
+    PRESENCE_STATUS_COMPLETED,
+    PRESENCE_STATUS_FAILED,
+    PRESENCE_STATUS_PARTIAL_EVIDENCE,
+)
+
 
 class AttendanceSession(db.Model):
     __tablename__ = "attendance_sessions"
@@ -16,6 +32,17 @@ class AttendanceSession(db.Model):
     progress_pct = db.Column(db.Integer, nullable=False, default=0)
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # Phase 5 additions - all nullable so existing sessions (created
+    # before Phase 5) keep working unchanged until/unless reconstructed.
+    actual_duration_seconds = db.Column(db.Float, nullable=True)
+    valid_duration_seconds = db.Column(db.Float, nullable=True)
+    presence_reconstructed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    presence_algorithm_version = db.Column(db.String(50), nullable=True)
+    presence_reconstruction_status = db.Column(
+        db.String(20), nullable=False, default=PRESENCE_STATUS_NOT_STARTED
+    )
+    presence_reconstruction_error = db.Column(db.Text, nullable=True)
 
     classroom = db.relationship("Classroom", back_populates="sessions")
     records = db.relationship(

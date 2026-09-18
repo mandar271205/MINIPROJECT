@@ -2,6 +2,7 @@ from .academic import AcademicYear, Division, FacultyAssignment, Semester, Subje
 from .attendance import AttendanceRecord, AttendanceSession
 from .classroom import Classroom
 from .observation import FaceTrack, RecognitionObservation
+from .presence import PresenceWindow
 from .student import Student
 from .user import User
 
@@ -13,6 +14,7 @@ __all__ = [
     "Division",
     "FaceTrack",
     "FacultyAssignment",
+    "PresenceWindow",
     "RecognitionObservation",
     "Semester",
     "Student",

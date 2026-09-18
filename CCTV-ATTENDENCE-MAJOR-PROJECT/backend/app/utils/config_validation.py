@@ -86,7 +86,54 @@ def validate_voting_config(config: dict) -> None:
     )
 
 
+# Sanity ceilings, not calibrated values - just a hard backstop so a
+# misconfigured value can never smooth a short sighting into
+# full-lecture presence. See presence_reconstruction.py.
+PRESENCE_MAX_SAFE_HALF_WIDTH_SECONDS = 300.0
+PRESENCE_MAX_SAFE_BRIDGE_GAP_SECONDS = 120.0
+
+
+def validate_presence_config(config: dict) -> None:
+    half_width = config["PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS"]
+    bridge_gap = config["PRESENCE_MAX_BRIDGE_GAP_SECONDS"]
+    version = config["PRESENCE_ALGORITHM_VERSION"]
+
+    for name, value in (
+        ("PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS", half_width),
+        ("PRESENCE_MAX_BRIDGE_GAP_SECONDS", bridge_gap),
+    ):
+        _require(
+            value == value and value not in (float("inf"), float("-inf")),
+            f"{name} must be a finite number - got {value!r}",
+        )
+
+    _require(
+        half_width > 0.0,
+        f"PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS must be greater than zero - got {half_width!r}",
+    )
+    _require(
+        half_width <= PRESENCE_MAX_SAFE_HALF_WIDTH_SECONDS,
+        "PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS exceeds the safe ceiling of "
+        f"{PRESENCE_MAX_SAFE_HALF_WIDTH_SECONDS}s - got {half_width!r}",
+    )
+    _require(
+        bridge_gap >= 0.0,
+        f"PRESENCE_MAX_BRIDGE_GAP_SECONDS must be zero or greater - got {bridge_gap!r}",
+    )
+    _require(
+        bridge_gap <= PRESENCE_MAX_SAFE_BRIDGE_GAP_SECONDS,
+        "PRESENCE_MAX_BRIDGE_GAP_SECONDS exceeds the safe ceiling of "
+        f"{PRESENCE_MAX_SAFE_BRIDGE_GAP_SECONDS}s (a larger value risks making a short sighting "
+        f"look like full-session presence) - got {bridge_gap!r}",
+    )
+    _require(
+        isinstance(version, str) and version.strip() != "",
+        f"PRESENCE_ALGORITHM_VERSION must be a non-empty string - got {version!r}",
+    )
+
+
 def validate_all(config: dict) -> None:
     validate_recognition_config(config)
     validate_tracking_config(config)
     validate_voting_config(config)
+    validate_presence_config(config)

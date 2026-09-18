@@ -93,6 +93,28 @@ def _process_session(app, session_id: int) -> None:
             if not session.session_date:
                 session.session_date = (session.class_start_time or utc_now()).date()
             db.session.commit()
+
+            # Phase 5: presence reconstruction only ever runs after the
+            # legacy job above has already committed as "done" and the
+            # pipeline's own diagnostics confirm EOF was reached. A
+            # reconstruction failure is recorded on the session by
+            # presence_service itself and must never flip the
+            # already-successful video-processing status back to
+            # "error" - the two are independent processing states.
+            diagnostics = results.get("diagnostics") or {}
+            try:
+                from .presence_service import run_presence_reconstruction
+
+                run_presence_reconstruction(
+                    session.id,
+                    eof_reached=diagnostics.get("eof_reached"),
+                    video_duration_seconds=diagnostics.get("video_duration_sec"),
+                )
+            except Exception:
+                current_app.logger.exception(
+                    "Presence reconstruction failed for session %d (video processing itself succeeded)",
+                    session.id,
+                )
         except Exception as exc:
             db.session.rollback()
             session.processing_status = "error"

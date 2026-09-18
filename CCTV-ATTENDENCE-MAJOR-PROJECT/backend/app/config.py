@@ -71,6 +71,21 @@ class Config:
     IDENTITY_CONFLICT_SUPPORT = int(os.getenv("IDENTITY_CONFLICT_SUPPORT", "2"))
     IDENTITY_UNLOCK_POLICY = os.getenv("IDENTITY_UNLOCK_POLICY", "never")
 
+    # Phase 5 - presence-window reconstruction (gap smoothing, not
+    # attendance decisions). Development defaults only - real
+    # calibration requires labelled footage. See
+    # app/services/presence_reconstruction.py. Half-width defaults to
+    # half the sampling interval; bridge gap defaults to one full
+    # sampling interval, deliberately small so a short sighting can
+    # never be smoothed into full-lecture presence.
+    PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS = float(
+        os.getenv("PRESENCE_EVIDENCE_HALF_WIDTH_SECONDS", str(FRAME_SAMPLE_INTERVAL_SECONDS / 2.0))
+    )
+    PRESENCE_MAX_BRIDGE_GAP_SECONDS = float(
+        os.getenv("PRESENCE_MAX_BRIDGE_GAP_SECONDS", str(FRAME_SAMPLE_INTERVAL_SECONDS))
+    )
+    PRESENCE_ALGORITHM_VERSION = os.getenv("PRESENCE_ALGORITHM_VERSION", "presence_v1")
+
     CORS_ORIGINS = _split_origins(os.getenv("CORS_ORIGINS", "http://localhost:5173"))
 
     DEFAULT_HOD_NAME = os.getenv("DEFAULT_HOD_NAME", "HOD Admin")

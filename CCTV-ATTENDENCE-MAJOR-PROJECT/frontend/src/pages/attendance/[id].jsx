@@ -2,7 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import StatusBadge from "@/components/StatusBadge";
-import { downloadPDF, downloadXLSX, getRecognitionEvidence, getSession, getTrackObservations } from "@/lib/api";
+import {
+  downloadPDF,
+  downloadXLSX,
+  getRecognitionEvidence,
+  getSession,
+  getSessionPresence,
+  getTrackObservations,
+  reconstructPresence,
+} from "@/lib/api";
 import { getTokenUser } from "@/lib/auth";
 
 const AttendanceReportPage = () => {
@@ -27,6 +35,12 @@ const AttendanceReportPage = () => {
   const [observationsTotal, setObservationsTotal] = useState(0);
   const [observationsLoading, setObservationsLoading] = useState(false);
   const OBSERVATIONS_PER_PAGE = 20;
+
+  const [presence, setPresence] = useState(null);
+  const [presenceLoading, setPresenceLoading] = useState(true);
+  const [presenceError, setPresenceError] = useState("");
+  const [reconstructing, setReconstructing] = useState(false);
+  const [expandedPresenceStudentId, setExpandedPresenceStudentId] = useState(null);
 
   useEffect(() => {
     const load = async () => {
@@ -76,6 +90,41 @@ const AttendanceReportPage = () => {
 
     loadEvidence();
   }, [sessionId, isStudent]);
+
+  const loadPresence = async () => {
+    if (!Number.isInteger(sessionId) || isStudent) {
+      setPresenceLoading(false);
+      return;
+    }
+    setPresenceLoading(true);
+    setPresenceError("");
+    try {
+      const data = await getSessionPresence(sessionId);
+      setPresence(data);
+    } catch (requestError) {
+      setPresenceError(requestError.message);
+    } finally {
+      setPresenceLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadPresence();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, isStudent]);
+
+  const handleReconstructPresence = async () => {
+    setReconstructing(true);
+    setPresenceError("");
+    try {
+      await reconstructPresence(sessionId);
+      await loadPresence();
+    } catch (requestError) {
+      setPresenceError(requestError.message);
+    } finally {
+      setReconstructing(false);
+    }
+  };
 
   const toggleTrackObservations = async (trackId) => {
     if (expandedTrackId === trackId) {
@@ -446,6 +495,174 @@ const AttendanceReportPage = () => {
                         </tbody>
                       </table>
                     </div>
+                  </>
+                ) : null}
+              </section>
+            ) : null}
+
+            {!isStudent ? (
+              <section className="mt-5 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-lg font-semibold">Presence Reconstruction</h2>
+                  <button
+                    type="button"
+                    onClick={handleReconstructPresence}
+                    disabled={reconstructing}
+                    className="rounded-lg border border-[#C10202] px-3 py-2 text-sm font-semibold text-[#C10202] transition hover:bg-red-50 disabled:opacity-60"
+                  >
+                    {reconstructing ? "Reconstructing..." : "Reconstruct Presence"}
+                  </button>
+                </div>
+
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  Presence percentage is reconstructed from confirmed recognition evidence. Final
+                  attendance status will be assigned in a later verification phase.
+                </div>
+
+                {presenceLoading ? (
+                  <p className="text-sm text-gray-600">Loading presence reconstruction...</p>
+                ) : null}
+
+                {!presenceLoading && presenceError ? (
+                  /permission|forbidden|403|401/i.test(presenceError) ? (
+                    <p className="text-sm text-gray-600">
+                      You do not have permission to view presence data for this session.
+                    </p>
+                  ) : (
+                    <p className="text-sm text-red-700">{presenceError}</p>
+                  )
+                ) : null}
+
+                {!presenceLoading && !presenceError && presence ? (
+                  <>
+                    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-sm font-semibold text-gray-900">{presence.reconstruction_status}</p>
+                        <p className="text-xs text-gray-500">Status</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-sm font-semibold text-gray-900">
+                          {presence.actual_duration_seconds != null
+                            ? `${presence.actual_duration_seconds.toFixed(0)}s`
+                            : "-"}
+                        </p>
+                        <p className="text-xs text-gray-500">Video Duration</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-sm font-semibold text-gray-900">
+                          {presence.valid_duration_seconds != null
+                            ? `${presence.valid_duration_seconds.toFixed(0)}s`
+                            : "-"}
+                        </p>
+                        <p className="text-xs text-gray-500">Valid Session Duration</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+                        <p className="text-sm font-semibold text-gray-900">{presence.algorithm_version || "-"}</p>
+                        <p className="text-xs text-gray-500">Algorithm Version</p>
+                      </div>
+                    </div>
+
+                    {presence.reconstruction_error ? (
+                      <p className="mb-3 text-xs text-red-700">{presence.reconstruction_error}</p>
+                    ) : null}
+
+                    {presence.students.length === 0 && presence.ineligible_students.length === 0 ? (
+                      <p className="text-sm text-gray-500">
+                        No presence data yet. Use "Reconstruct Presence" once video processing has
+                        completed.
+                      </p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-200 text-left text-gray-600">
+                              <th className="px-3 py-2">Student</th>
+                              <th className="px-3 py-2">Windows</th>
+                              <th className="px-3 py-2">Observed</th>
+                              <th className="px-3 py-2">Inferred</th>
+                              <th className="px-3 py-2">Total</th>
+                              <th className="px-3 py-2">Percentage</th>
+                              <th className="px-3 py-2">First / Last</th>
+                              <th className="px-3 py-2">Mean Confidence</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {presence.students.map((s) => (
+                              <>
+                                <tr key={s.student_id} className="border-b border-gray-100">
+                                  <td className="px-3 py-2">#{s.student_id}</td>
+                                  <td className="px-3 py-2">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedPresenceStudentId(
+                                          expandedPresenceStudentId === s.student_id ? null : s.student_id,
+                                        )
+                                      }
+                                      className="text-[#C10202] underline"
+                                    >
+                                      {s.window_count}
+                                    </button>
+                                  </td>
+                                  <td className="px-3 py-2">{s.observed_presence_seconds.toFixed(1)}s</td>
+                                  <td className="px-3 py-2">{s.inferred_gap_seconds.toFixed(1)}s</td>
+                                  <td className="px-3 py-2">{s.total_presence_seconds.toFixed(1)}s</td>
+                                  <td className="px-3 py-2">
+                                    {s.presence_percentage != null ? `${s.presence_percentage.toFixed(1)}%` : "-"}
+                                  </td>
+                                  <td className="px-3 py-2 text-xs text-gray-500">
+                                    {s.first_confirmed_presence_seconds != null
+                                      ? `${s.first_confirmed_presence_seconds.toFixed(1)}s - ${s.last_confirmed_presence_seconds.toFixed(1)}s`
+                                      : "-"}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {s.mean_confidence != null ? s.mean_confidence.toFixed(2) : "-"}
+                                  </td>
+                                </tr>
+                                {expandedPresenceStudentId === s.student_id && s.windows ? (
+                                  <tr key={`${s.student_id}-windows`}>
+                                    <td colSpan={8} className="bg-gray-50 px-3 py-3">
+                                      <table className="min-w-full text-xs">
+                                        <thead>
+                                          <tr className="text-left text-gray-500">
+                                            <th className="px-2 py-1">Window</th>
+                                            <th className="px-2 py-1">Start</th>
+                                            <th className="px-2 py-1">End</th>
+                                            <th className="px-2 py-1">Observed</th>
+                                            <th className="px-2 py-1">Inferred</th>
+                                            <th className="px-2 py-1">Total</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {s.windows.map((w) => (
+                                            <tr key={w.window_index} className="border-t border-gray-200">
+                                              <td className="px-2 py-1">{w.window_index}</td>
+                                              <td className="px-2 py-1">{w.start_seconds.toFixed(1)}s</td>
+                                              <td className="px-2 py-1">{w.end_seconds.toFixed(1)}s</td>
+                                              <td className="px-2 py-1">{w.observed_duration_seconds.toFixed(1)}s</td>
+                                              <td className="px-2 py-1">{w.inferred_gap_seconds.toFixed(1)}s</td>
+                                              <td className="px-2 py-1">{w.total_duration_seconds.toFixed(1)}s</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </td>
+                                  </tr>
+                                ) : null}
+                              </>
+                            ))}
+                            {presence.ineligible_students.map((s) => (
+                              <tr key={`ineligible-${s.student_id}`} className="border-b border-gray-100 bg-amber-50">
+                                <td className="px-3 py-2">#{s.student_id}</td>
+                                <td className="px-3 py-2 text-xs text-amber-700" colSpan={7}>
+                                  Re-enrolment required ({s.reason_code}) - presence not calculated.
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </>
                 ) : null}
               </section>

@@ -167,6 +167,14 @@ export const getTrackObservations = async (sessionId, trackId, { page = 1, perPa
     )
   ).data;
 
+// --- Phase 5: presence reconstruction --------------------------------------
+
+export const getSessionPresence = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/presence`)).data;
+
+export const reconstructPresence = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/reconstruct-presence`, { method: "POST" })).data;
+
 export const downloadXLSX = async (sessionId) =>
   request(`/api/reports/${sessionId}/xlsx`, {
     responseType: "blob",
