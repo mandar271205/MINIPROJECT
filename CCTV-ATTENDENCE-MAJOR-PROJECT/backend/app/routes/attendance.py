@@ -337,6 +337,14 @@ def _presence_response(session: AttendanceSession) -> dict:
         "reconstructed_at": (
             session.presence_reconstructed_at.isoformat() if session.presence_reconstructed_at else None
         ),
+        # Reliability correction: any presence data reconstructed
+        # before verified full-video completion evidence existed (or
+        # for a session where that evidence is False/unavailable) may
+        # still be shown here as historical/diagnostic evidence, but
+        # is never sufficient on its own for an automatic attendance
+        # recommendation - see attendance_decision_engine.py.
+        "eof_reached": session.eof_reached,
+        "insufficient_for_automatic_attendance": session.eof_reached is not True,
         "students": student_summaries,
         "ineligible_students": [
             {
@@ -423,4 +431,327 @@ def set_start_time(session_id: int):
     session.session_date = class_start_time.date()
     db.session.commit()
 
-    return jsonify({"session": session.to_dict()})
+
+# ===========================================================================
+# Phase 6 - attendance policies, AI recommendations and independent flags
+# ===========================================================================
+#
+# CRITICAL: every value returned by the routes below is an AI SUGGESTION,
+# never a final/official attendance decision - see
+# services/attendance_decision_engine.py's module docstring. Faculty
+# review/finalisation does not exist yet (a later phase); nothing here
+# writes to attendance_records.status or any "final_status" field.
+
+import datetime as _dt
+
+
+def _parse_date_only(value):
+    if not value:
+        return None
+    try:
+        return _dt.date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _policy_payload_from_request():
+    payload = request.get_json(silent=True) or {}
+    parsed = dict(payload)
+    if "effective_from" in payload:
+        parsed["effective_from"] = _parse_date_only(payload["effective_from"])
+    if "effective_until" in payload:
+        parsed["effective_until"] = _parse_date_only(payload["effective_until"])
+    return parsed
+
+
+@bp.get("/policies")
+@require_roles("hod")
+def list_policies():
+    from ..models.attendance_policy import AttendancePolicy
+
+    policies = AttendancePolicy.query.order_by(AttendancePolicy.id).all()
+    return success({"policies": [p.to_dict() for p in policies]})
+
+
+@bp.post("/policies")
+@require_roles("hod")
+def create_policy_route():
+    from ..services.attendance_policy_service import create_policy
+
+    payload = _policy_payload_from_request()
+    policy = create_policy(payload, g.current_user.id)
+    return success(policy.to_dict(), "Policy created")
+
+
+@bp.get("/policies/<int:policy_id>")
+@require_roles("hod")
+def get_policy(policy_id: int):
+    from ..models.attendance_policy import AttendancePolicy
+
+    policy = AttendancePolicy.query.get(policy_id)
+    if not policy:
+        raise DomainError("NOT_FOUND", "Policy not found", 404)
+    return success(policy.to_dict())
+
+
+@bp.put("/policies/<int:policy_id>")
+@require_roles("hod")
+def update_policy_route(policy_id: int):
+    from ..models.attendance_policy import AttendancePolicy
+    from ..services.attendance_policy_service import update_policy
+
+    policy = AttendancePolicy.query.get(policy_id)
+    if not policy:
+        raise DomainError("NOT_FOUND", "Policy not found", 404)
+
+    payload = _policy_payload_from_request()
+    policy = update_policy(policy, payload)
+    return success(policy.to_dict(), "Policy updated")
+
+
+@bp.put("/policies/<int:policy_id>/status")
+@require_roles("hod")
+def set_policy_status_route(policy_id: int):
+    from ..models.attendance_policy import AttendancePolicy
+    from ..services.attendance_policy_service import set_policy_active_status
+
+    policy = AttendancePolicy.query.get(policy_id)
+    if not policy:
+        raise DomainError("NOT_FOUND", "Policy not found", 404)
+
+    payload = request.get_json(silent=True) or {}
+    if "is_active" not in payload:
+        raise DomainError("VALIDATION_ERROR", "is_active is required", 400)
+
+    policy = set_policy_active_status(policy, bool(payload["is_active"]))
+    return success(policy.to_dict(), "Policy status updated")
+
+
+@bp.get("/sessions/<int:session_id>/effective-policy")
+@require_roles("faculty", "hod")
+def get_effective_policy(session_id: int):
+    """HOD or the owning faculty may view which policy would apply to
+    this session right now - never a policy-editing capability for
+    faculty (that stays HOD-only, enforced above by @require_roles on
+    every /policies route)."""
+    from ..services.policy_resolution import PolicyAmbiguousError, PolicyNotFoundError, resolve_policy
+
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    classroom = session.classroom
+    try:
+        policy = resolve_policy(
+            subject_id=classroom.subject_id, division_id=classroom.division_id,
+            reference_date=session.session_date, db_session=db.session,
+        )
+    except PolicyNotFoundError:
+        raise DomainError("POLICY_NOT_FOUND", "No applicable attendance policy could be resolved for this session", 404)
+    except PolicyAmbiguousError as exc:
+        raise DomainError("POLICY_AMBIGUOUS", str(exc), 409)
+
+    return success({"session_id": session_id, "policy": policy.to_dict()})
+
+
+@bp.post("/sessions/<int:session_id>/generate-recommendations")
+@require_roles("faculty", "hod")
+def generate_recommendations_route(session_id: int):
+    """Manual (and, per attendance_service.py, automatic-after-EOF)
+    trigger. Same RBAC boundary as every other endpoint in this
+    blueprint; guarded against concurrent generation for the same
+    session by attendance_recommendation_service's own status check."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.attendance_recommendation_service import (
+        RecommendationGenerationNotAllowed,
+        generate_session_recommendations,
+    )
+
+    try:
+        result = generate_session_recommendations(session_id)
+    except RecommendationGenerationNotAllowed as exc:
+        raise DomainError("GENERATION_NOT_ALLOWED", str(exc), 409)
+    except Exception as exc:
+        raise DomainError("GENERATION_FAILED", "Recommendation generation failed", 500) from exc
+
+    return success(result, "Recommendation generation complete")
+
+
+def _recommendations_response(session):
+    from ..models.attendance_recommendation import AttendanceRecommendation
+
+    recommendations = (
+        AttendanceRecommendation.query.filter_by(session_id=session.id)
+        .order_by(AttendanceRecommendation.student_id)
+        .all()
+    )
+    return {
+        "session_id": session.id,
+        "is_finalised": session.is_finalised,
+        "finalised_at": session.finalised_at.isoformat() if session.finalised_at else None,
+        "finalised_by": session.finalised_by,
+        "finalisation_notes": session.finalisation_notes,
+        "recommendation_generation_status": session.recommendation_generation_status,
+        "recommendation_generation_error": session.recommendation_generation_error,
+        "recommendation_generated_at": (
+            session.recommendation_generated_at.isoformat() if session.recommendation_generated_at else None
+        ),
+        "recommendations": [r.to_dict() for r in recommendations],
+    }
+
+
+@bp.get("/sessions/<int:session_id>/recommendations")
+@require_roles("faculty", "hod")
+def get_recommendations(session_id: int):
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    return success(_recommendations_response(session))
+
+
+@bp.get("/sessions/<int:session_id>/students/<int:student_id>/recommendation")
+@require_roles("faculty", "hod")
+def get_student_recommendation(session_id: int, student_id: int):
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    data = _recommendations_response(session)
+    entry = next((r for r in data["recommendations"] if r["student_id"] == student_id), None)
+    if entry is None:
+        raise DomainError("NOT_FOUND", "No recommendation for this student in this session", 404)
+
+    return success({"session_id": session_id, "recommendation": entry})
+
+
+# ===========================================================================
+# Phase 7 - faculty review, manual overrides, and transaction-safe finalisation
+# ===========================================================================
+
+@bp.post("/sessions/<int:session_id>/students/<int:student_id>/override")
+@require_roles("faculty", "hod")
+def override_student_route(session_id: int, student_id: int):
+    """Faculty or HOD sets a manual attendance override with mandatory reason logging."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.attendance_finalisation_service import (
+        FinalisationError,
+        OverrideNotAllowed,
+        override_student_attendance,
+    )
+
+    payload = request.get_json(silent=True) or {}
+    status = payload.get("status")
+    reason = payload.get("reason")
+
+    try:
+        rec = override_student_attendance(
+            session_id=session.id,
+            student_id=student_id,
+            status=status,
+            reason=reason,
+            user_id=g.current_user.id,
+        )
+    except OverrideNotAllowed as exc:
+        raise DomainError("VALIDATION_ERROR", str(exc), 400)
+    except FinalisationError as exc:
+        raise DomainError("OVERRIDE_FAILED", str(exc), 404)
+    except Exception as exc:
+        raise DomainError("OVERRIDE_ERROR", "Failed to apply manual override", 500) from exc
+
+    return success(rec.to_dict(), "Manual override applied successfully")
+
+
+@bp.delete("/sessions/<int:session_id>/students/<int:student_id>/override")
+@require_roles("faculty", "hod")
+def reset_student_override_route(session_id: int, student_id: int):
+    """Faculty or HOD resets a manual attendance override back to AI recommendation."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.attendance_finalisation_service import (
+        FinalisationError,
+        reset_student_override,
+    )
+
+    try:
+        rec = reset_student_override(
+            session_id=session.id,
+            student_id=student_id,
+            user_id=g.current_user.id,
+        )
+    except FinalisationError as exc:
+        raise DomainError("RESET_FAILED", str(exc), 404)
+    except Exception as exc:
+        raise DomainError("RESET_ERROR", "Failed to reset manual override", 500) from exc
+
+    return success(rec.to_dict(), "Manual override reset successfully")
+
+
+@bp.post("/sessions/<int:session_id>/finalize")
+@bp.post("/sessions/<int:session_id>/finalise")
+@require_roles("faculty", "hod")
+def finalize_session_route(session_id: int):
+    """Transaction-safe atomic finalisation of session attendance into official records."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.attendance_finalisation_service import (
+        FinalisationError,
+        FinalisationNotAllowed,
+        OverrideNotAllowed,
+        UnresolvedReviewRequiredError,
+        finalize_session_attendance,
+    )
+
+    payload = request.get_json(silent=True) or {}
+    notes = payload.get("notes")
+    batch_overrides = payload.get("overrides")
+    allow_unresolved = bool(payload.get("allow_unresolved", False))
+
+    try:
+        finalised_session = finalize_session_attendance(
+            session_id=session.id,
+            user_id=g.current_user.id,
+            notes=notes,
+            batch_overrides=batch_overrides,
+            allow_unresolved=allow_unresolved,
+        )
+    except UnresolvedReviewRequiredError as exc:
+        raise DomainError(
+            "UNRESOLVED_REVIEW_REQUIRED",
+            str(exc),
+            400,
+        )
+    except FinalisationNotAllowed as exc:
+        raise DomainError("FINALISATION_NOT_ALLOWED", str(exc), 409)
+    except OverrideNotAllowed as exc:
+        raise DomainError("VALIDATION_ERROR", str(exc), 400)
+    except FinalisationError as exc:
+        raise DomainError("FINALISATION_FAILED", str(exc), 400)
+    except Exception as exc:
+        raise DomainError("FINALISATION_ERROR", "Failed to finalise attendance session", 500) from exc
+
+    return success(finalised_session.to_dict(), "Attendance finalised successfully")
+
+
+@bp.get("/sessions/<int:session_id>/audit-logs")
+@require_roles("faculty", "hod")
+def get_session_audit_logs_route(session_id: int):
+    """Retrieve full audit trail of overrides and finalisation actions for a session."""
+    session, error = _get_session_or_error(session_id, g.current_user)
+    if error:
+        return error
+
+    from ..services.attendance_finalisation_service import get_session_audit_logs
+
+    logs = get_session_audit_logs(session.id)
+    return success({"session_id": session.id, "audit_logs": logs})

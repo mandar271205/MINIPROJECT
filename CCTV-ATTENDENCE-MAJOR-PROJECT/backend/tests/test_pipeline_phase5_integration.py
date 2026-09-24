@@ -54,7 +54,7 @@ def synthetic_video():
         os.remove(path)
 
 
-def _make_session(video_path, processing_status="done"):
+def _make_session(video_path, processing_status="done", eof_reached=True):
     hod = User.query.filter_by(role="hod").first()
     if not hod:
         hod = User(name="Seed HOD", email=_uniq("hod") + "@example.com", role="hod")
@@ -74,6 +74,7 @@ def _make_session(video_path, processing_status="done"):
         class_id=classroom.id, uploaded_by=hod.id, session_date=datetime.date.today(),
         video_path=video_path, processing_status=processing_status,
     )
+    session.eof_reached = eof_reached
     db.session.add(session)
     db.session.commit()
     return session, student.id
@@ -112,10 +113,35 @@ def test_reconstruction_refused_when_processing_errored(app, synthetic_video):
 
 def test_reconstruction_refused_when_eof_not_reached(app, synthetic_video):
     with app.app_context():
-        session, _sid = _make_session(synthetic_video, processing_status="done")
+        session, _sid = _make_session(synthetic_video, processing_status="done", eof_reached=False)
         with pytest.raises(presence_service.PresenceReconstructionNotAllowed):
-            presence_service.run_presence_reconstruction(session.id, eof_reached=False)
+            presence_service.run_presence_reconstruction(session.id)
         assert session.presence_reconstruction_status != PRESENCE_STATUS_COMPLETED
+
+
+def test_reconstruction_refused_when_eof_unverified_null(app, synthetic_video):
+    """Reliability correction: a legacy session with no persisted EOF
+    evidence at all (NULL) must be refused exactly like an explicit
+    False - NULL is never treated as True."""
+    with app.app_context():
+        session, _sid = _make_session(synthetic_video, processing_status="done", eof_reached=None)
+        with pytest.raises(presence_service.PresenceReconstructionNotAllowed):
+            presence_service.run_presence_reconstruction(session.id)
+        assert session.presence_reconstruction_status != PRESENCE_STATUS_COMPLETED
+
+
+def test_manual_reconstruction_cannot_bypass_missing_eof_proof(app, synthetic_video, monkeypatch):
+    """The manual reconstruct-presence trigger never passes an
+    eof_reached argument at all - it must still be refused when the
+    session has no persisted eof_reached=True evidence, exactly as
+    the automatic post-processing call would be."""
+    with app.app_context():
+        session, sid = _make_session(synthetic_video, processing_status="done", eof_reached=None)
+        _patch_provider_and_classifier(monkeypatch, eligible_ids=[sid])
+
+        with pytest.raises(presence_service.PresenceReconstructionNotAllowed):
+            presence_service.run_presence_reconstruction(session.id)  # no eof_reached kwarg at all
+        assert PresenceWindow.query.filter_by(session_id=session.id).count() == 0
 
 
 def test_reconstruction_refused_when_already_processing(app, synthetic_video, monkeypatch):

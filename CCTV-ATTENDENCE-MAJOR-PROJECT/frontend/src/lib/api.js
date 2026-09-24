@@ -175,6 +175,47 @@ export const getSessionPresence = async (sessionId) =>
 export const reconstructPresence = async (sessionId) =>
   (await request(`/api/attendance/sessions/${sessionId}/reconstruct-presence`, { method: "POST" })).data;
 
+// --- Phase 6: attendance policies and AI recommendations -------------------
+// These are AI-SUGGESTED recommendations only, pending faculty review -
+// never final/official attendance. See attendance_decision_engine.py.
+
+export const getPolicies = async () => (await request("/api/attendance/policies")).data;
+export const createPolicy = async (payload) =>
+  (await request("/api/attendance/policies", { method: "POST", body: payload })).data;
+export const updatePolicy = async (id, payload) =>
+  (await request(`/api/attendance/policies/${id}`, { method: "PUT", body: payload })).data;
+export const setPolicyStatus = async (id, isActive) =>
+  (await request(`/api/attendance/policies/${id}/status`, { method: "PUT", body: { is_active: isActive } })).data;
+
+export const getEffectivePolicy = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/effective-policy`)).data;
+
+export const getRecommendations = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/recommendations`)).data;
+export const generateRecommendations = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/generate-recommendations`, { method: "POST" })).data;
+
+// --- Phase 7: manual overrides, finalisation, and audit logs ----------------
+export const overrideStudentRecommendation = async (sessionId, studentId, payload) =>
+  (await request(`/api/attendance/sessions/${sessionId}/students/${studentId}/override`, {
+    method: "POST",
+    body: payload,
+  })).data;
+
+export const resetStudentOverride = async (sessionId, studentId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/students/${studentId}/override`, {
+    method: "DELETE",
+  })).data;
+
+export const finalizeAttendance = async (sessionId, payload = {}) =>
+  (await request(`/api/attendance/sessions/${sessionId}/finalize`, {
+    method: "POST",
+    body: payload,
+  })).data;
+
+export const getSessionAuditLogs = async (sessionId) =>
+  (await request(`/api/attendance/sessions/${sessionId}/audit-logs`)).data;
+
 export const downloadXLSX = async (sessionId) =>
   request(`/api/reports/${sessionId}/xlsx`, {
     responseType: "blob",

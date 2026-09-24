@@ -55,8 +55,21 @@ def run_presence_reconstruction(
     Raises PresenceReconstructionNotAllowed (never runs anything) when:
       - the session doesn't exist
       - the video-processing job did not complete successfully
-      - the caller reports EOF was not reached
+      - the session has no PERSISTED, verified eof_reached=True evidence
       - a reconstruction is already in progress for this session
+
+    Reliability correction: the EOF gate reads the session's own
+    persisted `eof_reached` column - the single source of truth
+    written by attendance_service.py - rather than trusting a
+    caller-supplied flag. This closes a gap where the manual
+    "reconstruct presence" API route (which never passed an
+    `eof_reached` argument at all) could otherwise run reconstruction
+    against a session with no verified completion evidence, or with
+    legacy eof_reached=NULL, by simply never triggering the old
+    "eof_reached is False" check. NULL is never treated as True here.
+    The `eof_reached` keyword argument is still accepted for backward
+    compatibility with existing callers but no longer participates in
+    the gate itself.
 
     Any failure once reconstruction has started is recorded on the
     session (status=FAILED, error message) and re-raised - the
@@ -73,9 +86,10 @@ def run_presence_reconstruction(
             "Presence reconstruction requires the video processing job to have completed successfully"
         )
 
-    if eof_reached is False:
+    if session.eof_reached is not True:
         raise PresenceReconstructionNotAllowed(
-            "Presence reconstruction requires the full video to have reached EOF"
+            "Presence reconstruction requires verified full-video EOF completion evidence "
+            "(session.eof_reached must be True) - this session has none"
         )
 
     if session.presence_reconstruction_status == PRESENCE_STATUS_PROCESSING:

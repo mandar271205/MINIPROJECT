@@ -55,6 +55,39 @@ def create_app() -> Flask:
     def health_check():
         return jsonify({"status": "ok"})
 
+    @app.cli.command("seed-default-attendance-policy")
+    def seed_default_attendance_policy_command():
+        """Phase 6 - creates exactly one clearly-labelled, uncalibrated
+        "Development Default" attendance policy if, and only if, no
+        active default policy already exists. Idempotent: running this
+        again after a default already exists is a safe no-op, never a
+        duplicate. Never run automatically at startup - an operator
+        invokes this explicitly:
+
+            flask seed-default-attendance-policy
+        """
+        from .extensions import db
+        from .models.user import User
+        from .services.attendance_policy_service import ensure_development_default_policy
+
+        hod = User.query.filter_by(role="hod").first()
+        if not hod:
+            print("No HOD account exists yet - create one before seeding a policy.")
+            return
+
+        policy = ensure_development_default_policy(hod.id)
+        if policy is None:
+            print("An active default attendance policy already exists - nothing to do.")
+        else:
+            print(f"Created development-default attendance policy (id={policy.id}, name={policy.name!r}).")
+            print(f"  present_threshold_percentage={policy.present_threshold_percentage}")
+            print(f"  late_grace_seconds={policy.late_grace_seconds}")
+            print(f"  early_exit_tolerance_seconds={policy.early_exit_tolerance_seconds}")
+            print(f"  reentry_min_gap_seconds={policy.reentry_min_gap_seconds}")
+            print(f"  low_confidence_flag_threshold={policy.low_confidence_flag_threshold}")
+            print(f"  minimum_decision_confidence={policy.minimum_decision_confidence}")
+            print("  These are UNCALIBRATED development defaults, not official institutional rules.")
+
     @app.cli.command("transition-embeddings")
     def transition_embeddings_command():
         """Regenerate existing students' embeddings with the active

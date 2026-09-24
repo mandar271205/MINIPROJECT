@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AcademicManagementPage from "@/pages/academic";
 import AttendanceReportPage from "@/pages/attendance/[id]";
+import AttendancePoliciesPage from "@/pages/attendance/policies";
 import ClassDetailPage from "@/pages/classes/[id]";
 import DashboardPage from "@/pages/dashboard";
 import IndexPage from "@/pages/index";
@@ -52,6 +53,15 @@ const App = () => {
           element={
             <ProtectedRoute roles={["hod"]}>
               <AcademicManagementPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/attendance/policies"
+          element={
+            <ProtectedRoute roles={["hod"]}>
+              <AttendancePoliciesPage />
             </ProtectedRoute>
           }
         />

@@ -132,6 +132,14 @@ const DashboardPage = () => {
               </Link>
             ) : null}
             {isHod ? (
+              <Link
+                to="/attendance/policies"
+                className="rounded-lg border border-white/60 bg-white/10 px-4 py-2 font-semibold text-white shadow-sm transition hover:bg-white/20"
+              >
+                Attendance Policies
+              </Link>
+            ) : null}
+            {isHod ? (
               <button
                 type="button"
                 onClick={() => setFacultyOpen(true)}
