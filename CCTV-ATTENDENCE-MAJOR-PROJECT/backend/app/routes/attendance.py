@@ -755,3 +755,132 @@ def get_session_audit_logs_route(session_id: int):
 
     logs = get_session_audit_logs(session.id)
     return success({"session_id": session.id, "audit_logs": logs})
+
+
+# ===========================================================================
+# Phase 8 - At-Risk & Shortage Prediction Engine Endpoints
+# ===========================================================================
+
+@bp.get("/classes/<int:class_id>/at-risk")
+@require_roles("faculty", "hod")
+def get_class_at_risk_route(class_id: int):
+    """Retrieve at-risk and shortage predictions for all students in a classroom."""
+    allowed_classes = _allowed_classes(g.current_user)
+    allowed_ids = {cls.id for cls in allowed_classes}
+    if class_id not in allowed_ids:
+        return jsonify({"error": "Forbidden"}), 403
+
+    from ..services.risk_scoring_service import calculate_class_at_risk_students
+
+    threshold = request.args.get("threshold", type=float)
+    risk_level = request.args.get("risk_level")
+    only_finalised = request.args.get("only_finalised", "false").lower() in ("true", "1")
+
+    try:
+        result = calculate_class_at_risk_students(
+            class_id=class_id,
+            threshold=threshold,
+            risk_level_filter=risk_level,
+            only_finalised=only_finalised,
+        )
+    except ValueError as exc:
+        raise DomainError("NOT_FOUND", str(exc), 404)
+    except Exception as exc:
+        raise DomainError("RISK_EVALUATION_ERROR", "Failed to compute at-risk attendance metrics", 500) from exc
+
+    return success(result)
+
+
+@bp.get("/subjects/<int:subject_id>/at-risk")
+@require_roles("faculty", "hod")
+def get_subject_at_risk_route(subject_id: int):
+    """Retrieve at-risk and shortage predictions across all classes for an academic subject."""
+    from ..utils.security import faculty_has_assignment
+
+    if g.current_user.role != "hod" and not faculty_has_assignment(
+        g.current_user.id, subject_id=subject_id
+    ):
+        raise DomainError("NOT_FOUND", "Subject not found", 404)
+
+    from ..services.risk_scoring_service import calculate_subject_at_risk_students
+
+    division_id = request.args.get("division_id", type=int)
+    threshold = request.args.get("threshold", type=float)
+    risk_level = request.args.get("risk_level")
+    only_finalised = request.args.get("only_finalised", "false").lower() in ("true", "1")
+
+    try:
+        result = calculate_subject_at_risk_students(
+            subject_id=subject_id,
+            division_id=division_id,
+            threshold=threshold,
+            risk_level_filter=risk_level,
+            only_finalised=only_finalised,
+        )
+    except ValueError as exc:
+        raise DomainError("NOT_FOUND", str(exc), 404)
+    except Exception as exc:
+        raise DomainError("RISK_EVALUATION_ERROR", "Failed to compute at-risk subject metrics", 500) from exc
+
+    return success(result)
+
+
+@bp.get("/students/<int:student_id>/risk-profile")
+@require_roles("faculty", "hod", "student")
+def get_student_risk_profile_route(student_id: int):
+    """Retrieve comprehensive risk profile, streak analytics, and session history for a student."""
+    from ..models.student import Student
+    from ..services.risk_scoring_service import calculate_student_risk_profile
+
+    student = Student.query.get(student_id)
+    if not student:
+        raise DomainError("NOT_FOUND", "Student not found", 404)
+
+    if g.current_user.role == "student":
+        if student.user_id != g.current_user.id:
+            return jsonify({"error": "Forbidden"}), 403
+    elif g.current_user.role == "faculty":
+        allowed_classes = _allowed_classes(g.current_user)
+        allowed_ids = {cls.id for cls in allowed_classes}
+        if student.class_id not in allowed_ids:
+            return jsonify({"error": "Forbidden"}), 403
+
+    class_id = request.args.get("class_id", type=int)
+    threshold = request.args.get("threshold", type=float)
+    only_finalised = request.args.get("only_finalised", "false").lower() in ("true", "1")
+
+    try:
+        profile = calculate_student_risk_profile(
+            student_id=student.id,
+            class_id=class_id,
+            threshold=threshold,
+            only_finalised=only_finalised,
+        )
+    except ValueError as exc:
+        raise DomainError("NOT_FOUND", str(exc), 404)
+    except Exception as exc:
+        raise DomainError("RISK_EVALUATION_ERROR", "Failed to compute student risk profile", 500) from exc
+
+    return success(profile)
+
+
+@bp.get("/at-risk/overview")
+@require_roles("faculty", "hod")
+def get_at_risk_overview_route():
+    """Retrieve aggregated at-risk dashboard summary across all accessible classrooms."""
+    from ..services.risk_scoring_service import get_at_risk_dashboard_overview
+
+    threshold = request.args.get("threshold", type=float)
+    only_finalised = request.args.get("only_finalised", "false").lower() in ("true", "1")
+
+    try:
+        overview = get_at_risk_dashboard_overview(
+            g.current_user,
+            threshold=threshold,
+            only_finalised=only_finalised,
+        )
+    except Exception as exc:
+        raise DomainError("RISK_EVALUATION_ERROR", "Failed to generate at-risk overview", 500) from exc
+
+    return success(overview)
+

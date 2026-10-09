@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import Modal from "@/components/Modal";
-import { createClass, createFaculty, deleteClass, getClasses, getMe, getMyFacultyAssignments } from "@/lib/api";
+import {
+  createClass,
+  createFaculty,
+  deleteClass,
+  getAtRiskOverview,
+  getClasses,
+  getMe,
+  getMyFacultyAssignments,
+} from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 
 const DashboardPage = () => {
@@ -11,6 +19,7 @@ const DashboardPage = () => {
   const [user, setUser] = useState(null);
   const [classes, setClasses] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [atRiskOverview, setAtRiskOverview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -38,10 +47,15 @@ const DashboardPage = () => {
           const myAssignments = await getMyFacultyAssignments();
           setAssignments(myAssignments);
         } catch {
-          // Assigned-subjects panel is a convenience addition; failing to
-          // load it should never block the rest of the dashboard.
           setAssignments([]);
         }
+      }
+
+      try {
+        const riskData = await getAtRiskOverview();
+        setAtRiskOverview(riskData);
+      } catch {
+        setAtRiskOverview(null);
       }
     } catch (requestError) {
       setError(requestError.message);
@@ -49,6 +63,7 @@ const DashboardPage = () => {
       setLoading(false);
     }
   };
+
 
   useEffect(() => {
     loadData();
@@ -199,6 +214,86 @@ const DashboardPage = () => {
           </div>
         ) : null}
 
+        {!loading && atRiskOverview ? (
+          <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
+              <div>
+                <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-gray-500">
+                  Attendance Health & Shortage Prediction
+                </h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Monitored across {atRiskOverview.total_classes_monitored} class
+                  {atRiskOverview.total_classes_monitored === 1 ? "" : "es"} and{" "}
+                  {atRiskOverview.total_students_monitored} student
+                  {atRiskOverview.total_students_monitored === 1 ? "" : "s"}
+                </p>
+              </div>
+              {atRiskOverview.total_at_risk > 0 ? (
+                <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700">
+                  {atRiskOverview.total_at_risk} At-Risk Student
+                  {atRiskOverview.total_at_risk === 1 ? "" : "s"}
+                </span>
+              ) : (
+                <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">
+                  All Students On Track (&ge;75%)
+                </span>
+              )}
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-xl border border-red-100 bg-red-50/60 p-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-red-700">High Risk</span>
+                <p className="mt-1 text-2xl font-bold text-red-700">{atRiskOverview.high_risk_count}</p>
+                <p className="text-[11px] text-red-600/80">&lt;60% or &ge;3 absences</p>
+              </div>
+
+              <div className="rounded-xl border border-amber-100 bg-amber-50/60 p-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-amber-700">Medium Risk</span>
+                <p className="mt-1 text-2xl font-bold text-amber-700">{atRiskOverview.medium_risk_count}</p>
+                <p className="text-[11px] text-amber-600/80">60-74.9% or &gt;10% drop</p>
+              </div>
+
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700">Compliant</span>
+                <p className="mt-1 text-2xl font-bold text-emerald-700">{atRiskOverview.low_risk_count}</p>
+                <p className="text-[11px] text-emerald-600/80">&ge;75% stable</p>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-gray-600">Total Monitored</span>
+                <p className="mt-1 text-2xl font-bold text-gray-800">{atRiskOverview.total_students_monitored}</p>
+                <p className="text-[11px] text-gray-500">Across active sessions</p>
+              </div>
+            </div>
+
+            {atRiskOverview.top_at_risk_students && atRiskOverview.top_at_risk_students.length > 0 ? (
+              <div className="mt-4 rounded-xl border border-gray-100 bg-gray-50 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-700">
+                  Priority Intervention Required ({atRiskOverview.top_at_risk_students.length} students):
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {atRiskOverview.top_at_risk_students.slice(0, 8).map((st) => (
+                    <Link
+                      key={st.student_id}
+                      to={`/classes/${st.class_id}`}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
+                        st.risk_level === "HIGH"
+                          ? "border-red-300 bg-red-50 text-red-800 hover:bg-red-100"
+                          : "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                      }`}
+                    >
+                      <span className="font-bold">{st.roll_number}</span> - {st.student_name}
+                      <span className="rounded bg-white/80 px-1 py-0.5 text-[10px] font-bold">
+                        {st.attendance_percentage}%
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {!loading && classes.length === 0 ? (
           <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center text-gray-600">
             No classes yet. Start by creating your first class.
@@ -208,6 +303,7 @@ const DashboardPage = () => {
         {!loading && classes.length > 0 ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {classes.map((classItem) => (
+
               <article
                 key={classItem.id}
                 className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-l-4 hover:border-[#C10202]"

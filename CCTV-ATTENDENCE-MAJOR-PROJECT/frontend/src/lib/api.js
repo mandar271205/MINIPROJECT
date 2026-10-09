@@ -301,3 +301,28 @@ export const setStudentAccountStatus = async (studentId, isActive) =>
       body: { is_active: isActive },
     })
   ).data;
+
+// --- Phase 8: At-Risk & Shortage Prediction Engine ------------------------
+
+export const getClassAtRiskStudents = async (classId, params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return (await request(`/api/attendance/classes/${classId}/at-risk${query ? `?${query}` : ""}`)).data;
+};
+
+export const getSubjectAtRiskStudents = async (subjectId, params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return (await request(`/api/attendance/subjects/${subjectId}/at-risk${query ? `?${query}` : ""}`)).data;
+};
+
+export const getStudentRiskProfile = async (studentId, params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return (await request(`/api/attendance/students/${studentId}/risk-profile${query ? `?${query}` : ""}`)).data;
+};
+
+export const getMyRiskProfile = async () => (await request("/api/student/me/risk-profile")).data;
+
+export const getAtRiskOverview = async (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return (await request(`/api/attendance/at-risk/overview${query ? `?${query}` : ""}`)).data;
+};
+

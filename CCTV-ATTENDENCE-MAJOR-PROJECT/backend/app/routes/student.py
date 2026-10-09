@@ -18,3 +18,17 @@ def my_profile():
     if not profile:
         raise DomainError("NOT_FOUND", "No student profile is linked to this account", 404)
     return success(profile.to_profile_dict())
+
+
+@bp.get("/me/risk-profile")
+@require_student
+def my_risk_profile():
+    profile = Student.query.filter_by(user_id=g.current_user.id).first()
+    if not profile:
+        raise DomainError("NOT_FOUND", "No student profile is linked to this account", 404)
+
+    from ..services.risk_scoring_service import calculate_student_risk_profile
+
+    data = calculate_student_risk_profile(profile.id)
+    return success(data)
+
